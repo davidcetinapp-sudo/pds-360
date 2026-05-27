@@ -1,26 +1,76 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --pc-blue: #003b7a;
+  --pc-blue-dk: #002752;
+  --pc-blue-lt: #e6eef7;
+  --pc-red: #c0392b;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html, body { height: 100%; }
+
+@media print {
+  body * { visibility: hidden; }
+  .print-area, .print-area * { visibility: visible; }
+  .print-area { position: absolute; left: 0; top: 0; width: 100%; padding: 24px; background: white; color: black; }
+  .no-print { display: none !important; }
+  @page { size: A4 landscape; margin: 12mm; }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.btn { @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm shadow-sm; }
+.btn-primary   { @apply btn bg-[#003b7a] text-white hover:bg-[#002752]; }
+.btn-secondary { @apply btn bg-slate-200 text-slate-800 hover:bg-slate-300; }
+.btn-success   { @apply btn bg-emerald-600 text-white hover:bg-emerald-700; }
+.btn-danger    { @apply btn bg-rose-600 text-white hover:bg-rose-700; }
+.btn-ghost     { @apply btn bg-transparent text-slate-700 hover:bg-slate-100; }
+.btn-orange    { @apply btn bg-orange-500 text-white hover:bg-orange-600; }
+
+.input, .select, .textarea {
+  @apply w-full px-3 py-2 rounded-md border border-slate-300 bg-white
+         focus:outline-none focus:ring-2 focus:ring-[#003b7a] focus:border-transparent text-sm;
+}
+.card  { @apply bg-white rounded-lg shadow-sm border border-slate-200; }
+.label { @apply block text-xs font-semibold text-slate-700 mb-1 uppercase tracking-wide; }
+
+.badge           { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold; }
+.badge-borrador  { @apply badge bg-amber-100 text-amber-800; }
+.badge-enviado   { @apply badge bg-emerald-100 text-emerald-800; }
+.badge-aprobado  { @apply badge bg-blue-100 text-blue-800; }
+.badge-ocupado   { @apply badge bg-rose-100 text-rose-800; }
+.badge-pendiente { @apply badge bg-slate-100 text-slate-700; }
+
+.table-wrap { @apply w-full overflow-x-auto; }
+.table      { @apply min-w-full text-sm; }
+.table th   { @apply px-3 py-2 text-left font-semibold text-slate-700 bg-slate-100 border-b; }
+.table td   { @apply px-3 py-2 border-b border-slate-200 align-top; }
+
+/* Step indicator */
+.step-active   { @apply flex items-center justify-center w-8 h-8 rounded-full bg-[#003b7a] text-white text-sm font-bold; }
+.step-done     { @apply flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500 text-white text-sm font-bold; }
+.step-pending  { @apply flex items-center justify-center w-8 h-8 rounded-full bg-slate-200 text-slate-600 text-sm font-bold; }
+
+/* Progress bar */
+.progress-bar { @apply h-3 bg-slate-100 rounded-full overflow-hidden; }
+.progress-fill-green  { @apply h-full bg-emerald-500 transition-all; }
+.progress-fill-yellow { @apply h-full bg-amber-500 transition-all; }
+.progress-fill-red    { @apply h-full bg-rose-500 transition-all; }
+.progress-fill-blue   { @apply h-full bg-[#003b7a] transition-all; }
+
+/* Dot pulse para sync */
+.dot-pulse {
+  width: 8px; height: 8px; border-radius: 999px; background: #10b981;
+  box-shadow: 0 0 0 0 rgba(16,185,129,.7);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(16,185,129,.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+  100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
+/* Semáforo */
+.semaforo-verde    { @apply text-emerald-600 font-bold; }
+.semaforo-amarillo { @apply text-amber-500 font-bold; }
+.semaforo-rojo     { @apply text-rose-600 font-bold; }

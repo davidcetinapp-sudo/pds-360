@@ -1,0 +1,19 @@
+{
+  "name": "Powerchina - PDS 360",
+  "short_name": "PDS 360",
+  "description": "Gestión integral de obra · Planeación y seguimiento · Proyecto PDS",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#003b7a",
+  "theme_color": "#003b7a",
+  "lang": "es",
+  "scope": "/",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ],
+  "categories": ["business", "productivity"],
+  "screenshots": []
+}
