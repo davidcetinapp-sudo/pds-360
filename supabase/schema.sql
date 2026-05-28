@@ -1,24 +1,15 @@
 -- ============================================================
--- Powerchina · PDS 360  ·  Supabase Schema v2.0
+-- Powerchina · PDS 360  ·  Supabase Schema v2.1  (ORDEN CORREGIDO)
 -- Ejecutar completo en: Supabase → SQL Editor → New query
 -- ============================================================
 
 -- ── Extensiones ──────────────────────────────────────────────
 create extension if not exists "uuid-ossp";
 
--- ── Función helper: obtener rol del usuario actual ───────────
-create or replace function public.get_my_role()
-returns text
-language sql
-security definer stable
-as $$
-  select rol from public.profiles where id = auth.uid()
-$$;
-
 -- ============================================================
--- 1. PROFILES  (extiende auth.users)
+-- 1. PROFILES  (PRIMERO — otras funciones dependen de esta tabla)
 -- ============================================================
-create table public.profiles (
+create table if not exists public.profiles (
   id              uuid references auth.users on delete cascade primary key,
   nombre          text not null,
   correo          text unique not null,
@@ -30,7 +21,20 @@ create table public.profiles (
   updated_at      timestamptz default now()
 );
 
--- Crear perfil automáticamente al registrar usuario
+-- ============================================================
+-- 2. FUNCIÓN get_my_role()  (DESPUÉS de profiles)
+-- ============================================================
+create or replace function public.get_my_role()
+returns text
+language sql
+security definer stable
+as $$
+  select rol from public.profiles where id = auth.uid()
+$$;
+
+-- ============================================================
+-- 3. TRIGGER: crear perfil automáticamente al registrar usuario
+-- ============================================================
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer as $$
 begin
@@ -46,14 +50,15 @@ begin
 end;
 $$;
 
-create or replace trigger on_auth_user_created
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
 -- ============================================================
--- 2. CATÁLOGOS
+-- 4. CATÁLOGOS
 -- ============================================================
-create table public.especialidades_actividades (
+create table if not exists public.especialidades_actividades (
   id              uuid primary key default gen_random_uuid(),
   especialidad_es text not null,
   especialidad_en text not null default '',
@@ -63,7 +68,7 @@ create table public.especialidades_actividades (
   created_at      timestamptz default now()
 );
 
-create table public.areas (
+create table if not exists public.areas (
   id         uuid primary key default gen_random_uuid(),
   area_es    text not null,
   area_en    text not null default '',
@@ -71,7 +76,7 @@ create table public.areas (
   created_at timestamptz default now()
 );
 
-create table public.lideres (
+create table if not exists public.lideres (
   id              uuid primary key default gen_random_uuid(),
   nombre          text not null,
   documento       text not null,
@@ -82,7 +87,7 @@ create table public.lideres (
   created_at      timestamptz default now()
 );
 
-create table public.personal (
+create table if not exists public.personal (
   id                uuid primary key default gen_random_uuid(),
   nombre            text not null,
   documento         text not null unique,
@@ -96,7 +101,7 @@ create table public.personal (
   created_at        timestamptz default now()
 );
 
-create table public.subcontratistas (
+create table if not exists public.subcontratistas (
   id         uuid primary key default gen_random_uuid(),
   empresa    text not null,
   nit        text,
@@ -108,9 +113,9 @@ create table public.subcontratistas (
 );
 
 -- ============================================================
--- 3. MAQUINARIA
+-- 5. MAQUINARIA
 -- ============================================================
-create table public.maquinaria (
+create table if not exists public.maquinaria (
   id                    uuid primary key default gen_random_uuid(),
   tipo                  text not null,
   item_id               text not null unique,
@@ -125,9 +130,9 @@ create table public.maquinaria (
 );
 
 -- ============================================================
--- 4. CONFIG DE ACTIVIDADES  (Tipo A / B / C)
+-- 6. CONFIG DE ACTIVIDADES
 -- ============================================================
-create table public.config_actividades (
+create table if not exists public.config_actividades (
   id                   uuid primary key default gen_random_uuid(),
   especialidad_id      uuid not null,
   actividad_id         uuid not null references public.especialidades_actividades(id),
@@ -145,9 +150,9 @@ create table public.config_actividades (
 );
 
 -- ============================================================
--- 5. INVENTARIO DE ÍTEMS ÚNICOS  (Tipo C)
+-- 7. INVENTARIO DE ÍTEMS ÚNICOS
 -- ============================================================
-create table public.inventario_items (
+create table if not exists public.inventario_items (
   id              uuid primary key default gen_random_uuid(),
   actividad_id    uuid not null references public.especialidades_actividades(id),
   item_id         text not null,
@@ -162,9 +167,9 @@ create table public.inventario_items (
 );
 
 -- ============================================================
--- 6. PLANEACIÓN
+-- 8. PLANEACIÓN
 -- ============================================================
-create table public.programaciones (
+create table if not exists public.programaciones (
   id             uuid primary key default gen_random_uuid(),
   fecha          date not null,
   usuario_id     uuid not null references public.profiles(id),
@@ -173,11 +178,11 @@ create table public.programaciones (
                  check (estado in ('borrador','enviado')),
   created_at     timestamptz default now(),
   updated_at     timestamptz default now(),
-  unique (fecha, usuario_id)   -- un usuario, una planeación por fecha
+  unique (fecha, usuario_id)
 );
 
--- ── FIX ERROR 3: cada actividad tiene su PROPIO líder ────────
-create table public.actividades_programadas (
+-- FIX ERROR 3: cada actividad tiene su propio líder
+create table if not exists public.actividades_programadas (
   id                  uuid primary key default gen_random_uuid(),
   programacion_id     uuid not null references public.programaciones(id) on delete cascade,
   fecha               date not null,
@@ -186,7 +191,7 @@ create table public.actividades_programadas (
   actividad_id        uuid not null references public.especialidades_actividades(id),
   area_id             uuid not null references public.areas(id),
   areas_adicionales   uuid[] default '{}',
-  lider_id            uuid references public.lideres(id),  -- ← líder propio de esta actividad
+  lider_id            uuid references public.lideres(id),
   maquinaria_ids      uuid[] default '{}',
   rendimiento_esperado text,
   observacion_es      text,
@@ -194,8 +199,8 @@ create table public.actividades_programadas (
   created_at          timestamptz default now()
 );
 
--- ── FIX ERROR 1: unique constraint = sin bloqueos de concurrencia ──
-create table public.personal_asignado (
+-- FIX ERROR 1: unique constraint = sin bloqueos de concurrencia
+create table if not exists public.personal_asignado (
   id                      uuid primary key default gen_random_uuid(),
   programacion_id         uuid not null references public.programaciones(id) on delete cascade,
   actividad_programada_id uuid not null references public.actividades_programadas(id) on delete cascade,
@@ -204,15 +209,13 @@ create table public.personal_asignado (
   personal_id             uuid not null references public.personal(id),
   documento_personal      text not null,
   created_at              timestamptz default now(),
-  -- Si alguien ya está asignado esa fecha, PostgreSQL lanza error 23505 inmediatamente
-  -- sin bloquear a nadie más
   unique (fecha, documento_personal, usuario_id)
 );
 
 -- ============================================================
--- 7. REPORTE DIARIO DE AVANCE
+-- 9. REPORTE DIARIO DE AVANCE
 -- ============================================================
-create table public.reportes_avance (
+create table if not exists public.reportes_avance (
   id              uuid primary key default gen_random_uuid(),
   fecha           date not null,
   usuario_id      uuid not null references public.profiles(id),
@@ -231,7 +234,7 @@ create table public.reportes_avance (
   updated_at      timestamptz default now()
 );
 
-create table public.asistencia_real (
+create table if not exists public.asistencia_real (
   id                 uuid primary key default gen_random_uuid(),
   reporte_id         uuid not null references public.reportes_avance(id) on delete cascade,
   fecha              date not null,
@@ -244,7 +247,7 @@ create table public.asistencia_real (
   created_at         timestamptz default now()
 );
 
-create table public.avance_diario (
+create table if not exists public.avance_diario (
   id                 uuid primary key default gen_random_uuid(),
   reporte_id         uuid not null references public.reportes_avance(id) on delete cascade,
   fecha              date not null,
@@ -261,7 +264,7 @@ create table public.avance_diario (
   created_at         timestamptz default now()
 );
 
-create table public.ejecucion_items (
+create table if not exists public.ejecucion_items (
   id           uuid primary key default gen_random_uuid(),
   reporte_id   uuid not null references public.reportes_avance(id) on delete cascade,
   fecha        date not null,
@@ -273,7 +276,7 @@ create table public.ejecucion_items (
   created_at   timestamptz default now()
 );
 
-create table public.novedades_maquinaria (
+create table if not exists public.novedades_maquinaria (
   id            uuid primary key default gen_random_uuid(),
   reporte_id    uuid not null references public.reportes_avance(id) on delete cascade,
   fecha         date not null,
@@ -286,7 +289,7 @@ create table public.novedades_maquinaria (
   created_at    timestamptz default now()
 );
 
-create table public.suspensiones_clima (
+create table if not exists public.suspensiones_clima (
   id             uuid primary key default gen_random_uuid(),
   reporte_id     uuid not null references public.reportes_avance(id) on delete cascade,
   fecha          date not null,
@@ -298,7 +301,7 @@ create table public.suspensiones_clima (
   created_at     timestamptz default now()
 );
 
-create table public.incidentes_seg (
+create table if not exists public.incidentes_seg (
   id              uuid primary key default gen_random_uuid(),
   reporte_id      uuid not null references public.reportes_avance(id) on delete cascade,
   fecha           date not null,
@@ -311,7 +314,7 @@ create table public.incidentes_seg (
   created_at      timestamptz default now()
 );
 
-create table public.aprobacion_informes (
+create table if not exists public.aprobacion_informes (
   id           uuid primary key default gen_random_uuid(),
   reporte_id   uuid not null references public.reportes_avance(id) on delete cascade,
   aprobado_por uuid not null references public.profiles(id),
@@ -321,7 +324,7 @@ create table public.aprobacion_informes (
   created_at   timestamptz default now()
 );
 
-create table public.fotos_reporte (
+create table if not exists public.fotos_reporte (
   id           uuid primary key default gen_random_uuid(),
   reporte_id   uuid not null references public.reportes_avance(id) on delete cascade,
   fecha        date not null,
@@ -333,7 +336,10 @@ create table public.fotos_reporte (
   created_at   timestamptz default now()
 );
 
-create table public.calendario (
+-- ============================================================
+-- 10. TABLAS DE APOYO
+-- ============================================================
+create table if not exists public.calendario (
   id            uuid primary key default gen_random_uuid(),
   fecha         date not null unique,
   tipo          text not null check (tipo in ('festivo','no_laborable','laborable_especial')),
@@ -342,7 +348,7 @@ create table public.calendario (
   created_at    timestamptz default now()
 );
 
-create table public.bitacora_decisiones (
+create table if not exists public.bitacora_decisiones (
   id              uuid primary key default gen_random_uuid(),
   fecha           date not null,
   usuario_id      uuid not null references public.profiles(id),
@@ -353,7 +359,7 @@ create table public.bitacora_decisiones (
   created_at      timestamptz default now()
 );
 
-create table public.log_cambios (
+create table if not exists public.log_cambios (
   id             uuid primary key default gen_random_uuid(),
   tabla_afectada text not null,
   registro_id    uuid,
@@ -366,109 +372,104 @@ create table public.log_cambios (
 );
 
 -- ============================================================
--- ÍNDICES  (rendimiento en consultas frecuentes)
+-- 11. ÍNDICES
 -- ============================================================
-create index idx_prog_fecha        on public.programaciones(fecha);
-create index idx_prog_usuario      on public.programaciones(usuario_id);
-create index idx_actprog_prog      on public.actividades_programadas(programacion_id);
-create index idx_actprog_fecha     on public.actividades_programadas(fecha);
-create index idx_persasig_fecha    on public.personal_asignado(fecha, documento_personal);
-create index idx_rep_fecha         on public.reportes_avance(fecha);
-create index idx_rep_usuario       on public.reportes_avance(usuario_id);
-create index idx_rep_esp           on public.reportes_avance(especialidad_id);
-create index idx_avance_fecha      on public.avance_diario(fecha);
-create index idx_avance_act        on public.avance_diario(actividad_id);
-create index idx_avance_area       on public.avance_diario(area_id);
+create index if not exists idx_prog_fecha     on public.programaciones(fecha);
+create index if not exists idx_prog_usuario   on public.programaciones(usuario_id);
+create index if not exists idx_actprog_prog   on public.actividades_programadas(programacion_id);
+create index if not exists idx_actprog_fecha  on public.actividades_programadas(fecha);
+create index if not exists idx_persasig_fecha on public.personal_asignado(fecha, documento_personal);
+create index if not exists idx_rep_fecha      on public.reportes_avance(fecha);
+create index if not exists idx_rep_usuario    on public.reportes_avance(usuario_id);
+create index if not exists idx_rep_esp        on public.reportes_avance(especialidad_id);
+create index if not exists idx_avance_fecha   on public.avance_diario(fecha);
+create index if not exists idx_avance_act     on public.avance_diario(actividad_id);
+create index if not exists idx_avance_area    on public.avance_diario(area_id);
 
 -- ============================================================
--- RLS  (Row Level Security)
+-- 12. RLS (Row Level Security)
 -- ============================================================
-alter table public.profiles                 enable row level security;
-alter table public.especialidades_actividades enable row level security;
-alter table public.areas                    enable row level security;
-alter table public.lideres                  enable row level security;
-alter table public.personal                 enable row level security;
-alter table public.subcontratistas          enable row level security;
-alter table public.maquinaria               enable row level security;
-alter table public.config_actividades       enable row level security;
-alter table public.inventario_items         enable row level security;
-alter table public.programaciones           enable row level security;
-alter table public.actividades_programadas  enable row level security;
-alter table public.personal_asignado        enable row level security;
-alter table public.reportes_avance          enable row level security;
-alter table public.asistencia_real          enable row level security;
-alter table public.avance_diario            enable row level security;
-alter table public.ejecucion_items          enable row level security;
-alter table public.novedades_maquinaria     enable row level security;
-alter table public.suspensiones_clima       enable row level security;
-alter table public.incidentes_seg           enable row level security;
-alter table public.aprobacion_informes      enable row level security;
-alter table public.fotos_reporte            enable row level security;
-alter table public.calendario               enable row level security;
-alter table public.bitacora_decisiones      enable row level security;
-alter table public.log_cambios              enable row level security;
+alter table public.profiles                   enable row level security;
+alter table public.especialidades_actividades  enable row level security;
+alter table public.areas                       enable row level security;
+alter table public.lideres                     enable row level security;
+alter table public.personal                    enable row level security;
+alter table public.subcontratistas             enable row level security;
+alter table public.maquinaria                  enable row level security;
+alter table public.config_actividades          enable row level security;
+alter table public.inventario_items            enable row level security;
+alter table public.programaciones              enable row level security;
+alter table public.actividades_programadas     enable row level security;
+alter table public.personal_asignado           enable row level security;
+alter table public.reportes_avance             enable row level security;
+alter table public.asistencia_real             enable row level security;
+alter table public.avance_diario               enable row level security;
+alter table public.ejecucion_items             enable row level security;
+alter table public.novedades_maquinaria        enable row level security;
+alter table public.suspensiones_clima          enable row level security;
+alter table public.incidentes_seg              enable row level security;
+alter table public.aprobacion_informes         enable row level security;
+alter table public.fotos_reporte               enable row level security;
+alter table public.calendario                  enable row level security;
+alter table public.bitacora_decisiones         enable row level security;
+alter table public.log_cambios                 enable row level security;
+
+-- ============================================================
+-- 13. POLÍTICAS RLS
+-- ============================================================
 
 -- Profiles
-create policy "profiles_select" on public.profiles for select to authenticated using (true);
-create policy "profiles_update_self" on public.profiles for update to authenticated using (auth.uid() = id);
-create policy "profiles_admin" on public.profiles for all to authenticated using (get_my_role() = 'admin');
+create policy "profiles_select"      on public.profiles for select      to authenticated using (true);
+create policy "profiles_update_self" on public.profiles for update      to authenticated using (auth.uid() = id);
+create policy "profiles_admin"       on public.profiles for all         to authenticated using (get_my_role() = 'admin');
 
--- Catálogos (lectura = todos los autenticados, escritura = admin)
+-- Catálogos (lectura = todos, escritura = admin)
 create policy "ea_select" on public.especialidades_actividades for select to authenticated using (true);
 create policy "ea_admin"  on public.especialidades_actividades for all   to authenticated using (get_my_role() = 'admin');
-create policy "ar_select" on public.areas        for select to authenticated using (true);
-create policy "ar_admin"  on public.areas        for all   to authenticated using (get_my_role() = 'admin');
-create policy "li_select" on public.lideres      for select to authenticated using (true);
-create policy "li_admin"  on public.lideres      for all   to authenticated using (get_my_role() = 'admin');
-create policy "pe_select" on public.personal     for select to authenticated using (true);
-create policy "pe_admin"  on public.personal     for all   to authenticated using (get_my_role() = 'admin');
-create policy "su_select" on public.subcontratistas for select to authenticated using (true);
-create policy "su_admin"  on public.subcontratistas for all   to authenticated using (get_my_role() = 'admin');
-create policy "ma_select" on public.maquinaria       for select to authenticated using (true);
-create policy "ma_admin"  on public.maquinaria       for all   to authenticated using (get_my_role() = 'admin');
-create policy "ca_select" on public.config_actividades for select to authenticated using (true);
-create policy "ca_admin"  on public.config_actividades for all   to authenticated using (get_my_role() = 'admin');
-create policy "ii_select" on public.inventario_items   for select to authenticated using (true);
-create policy "ii_admin"  on public.inventario_items   for all   to authenticated using (get_my_role() = 'admin');
-create policy "cal_select" on public.calendario        for select to authenticated using (true);
-create policy "cal_admin"  on public.calendario        for all   to authenticated using (get_my_role() = 'admin');
+create policy "ar_select" on public.areas                      for select to authenticated using (true);
+create policy "ar_admin"  on public.areas                      for all   to authenticated using (get_my_role() = 'admin');
+create policy "li_select" on public.lideres                    for select to authenticated using (true);
+create policy "li_admin"  on public.lideres                    for all   to authenticated using (get_my_role() = 'admin');
+create policy "pe_select" on public.personal                   for select to authenticated using (true);
+create policy "pe_admin"  on public.personal                   for all   to authenticated using (get_my_role() = 'admin');
+create policy "su_select" on public.subcontratistas            for select to authenticated using (true);
+create policy "su_admin"  on public.subcontratistas            for all   to authenticated using (get_my_role() = 'admin');
+create policy "ma_select" on public.maquinaria                 for select to authenticated using (true);
+create policy "ma_admin"  on public.maquinaria                 for all   to authenticated using (get_my_role() = 'admin');
+create policy "ca_select" on public.config_actividades         for select to authenticated using (true);
+create policy "ca_admin"  on public.config_actividades         for all   to authenticated using (get_my_role() = 'admin');
+create policy "ii_select" on public.inventario_items           for select to authenticated using (true);
+create policy "ii_admin"  on public.inventario_items           for all   to authenticated using (get_my_role() = 'admin');
+create policy "cal_select" on public.calendario                for select to authenticated using (true);
+create policy "cal_admin"  on public.calendario                for all   to authenticated using (get_my_role() = 'admin');
 
 -- Planeación
-create policy "prog_select" on public.programaciones for select to authenticated using (true);
-create policy "prog_write"  on public.programaciones for all to authenticated using (
-  (auth.uid() = usuario_id or get_my_role() = 'admin')
-  and get_my_role() in ('admin','lider','tecnico')
-);
-create policy "ap_select" on public.actividades_programadas for select to authenticated using (true);
-create policy "ap_write"  on public.actividades_programadas for all to authenticated using (
-  auth.uid() = usuario_id or get_my_role() = 'admin'
-);
-create policy "pa_select" on public.personal_asignado for select to authenticated using (true);
-create policy "pa_write"  on public.personal_asignado for all to authenticated using (
-  auth.uid() = usuario_id or get_my_role() = 'admin'
-);
+create policy "prog_select" on public.programaciones          for select to authenticated using (true);
+create policy "prog_write"  on public.programaciones          for all    to authenticated using ((auth.uid() = usuario_id or get_my_role() = 'admin') and get_my_role() in ('admin','lider','tecnico'));
+create policy "ap_select"   on public.actividades_programadas for select to authenticated using (true);
+create policy "ap_write"    on public.actividades_programadas for all    to authenticated using (auth.uid() = usuario_id or get_my_role() = 'admin');
+create policy "pa_select"   on public.personal_asignado       for select to authenticated using (true);
+create policy "pa_write"    on public.personal_asignado       for all    to authenticated using (auth.uid() = usuario_id or get_my_role() = 'admin');
 
 -- Reporte diario
-create policy "rep_select" on public.reportes_avance for select to authenticated using (true);
-create policy "rep_write"  on public.reportes_avance for all to authenticated using (
-  auth.uid() = usuario_id or get_my_role() in ('admin','lider')
-);
-create policy "as_all"  on public.asistencia_real      for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "av_all"  on public.avance_diario        for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "ei_all"  on public.ejecucion_items      for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "nm_all"  on public.novedades_maquinaria for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "sc_all"  on public.suspensiones_clima   for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "is_all"  on public.incidentes_seg       for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
-create policy "fr_all"  on public.fotos_reporte        for all to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "rep_select" on public.reportes_avance      for select to authenticated using (true);
+create policy "rep_write"  on public.reportes_avance      for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "as_all"  on public.asistencia_real         for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "av_all"  on public.avance_diario           for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "ei_all"  on public.ejecucion_items         for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "nm_all"  on public.novedades_maquinaria    for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "sc_all"  on public.suspensiones_clima      for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "is_all"  on public.incidentes_seg          for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
+create policy "fr_all"  on public.fotos_reporte           for all    to authenticated using (auth.uid() = usuario_id or get_my_role() in ('admin','lider'));
 create policy "apro_select" on public.aprobacion_informes for select to authenticated using (true);
 create policy "apro_write"  on public.aprobacion_informes for insert to authenticated with check (get_my_role() in ('admin','lider'));
 create policy "bit_select"  on public.bitacora_decisiones for select to authenticated using (true);
 create policy "bit_write"   on public.bitacora_decisiones for insert to authenticated with check (get_my_role() in ('admin','lider','tecnico'));
-create policy "log_select"  on public.log_cambios for select to authenticated using (get_my_role() in ('admin','gerencia'));
-create policy "log_insert"  on public.log_cambios for insert to authenticated with check (true);
+create policy "log_select"  on public.log_cambios         for select to authenticated using (get_my_role() in ('admin','gerencia'));
+create policy "log_insert"  on public.log_cambios         for insert to authenticated with check (true);
 
 -- ============================================================
--- DATOS INICIALES — Maquinaria
+-- 14. DATOS INICIALES — Maquinaria
 -- ============================================================
 insert into public.maquinaria (tipo, item_id, nombre, estado) values
   ('motosierra','MS-001','Motosierra 001','activo'),
@@ -479,4 +480,5 @@ insert into public.maquinaria (tipo, item_id, nombre, estado) values
   ('motosierra','MS-006','Motosierra 006','activo'),
   ('motosierra','MS-007','Motosierra 007','activo'),
   ('motosierra','MS-008','Motosierra 008','activo'),
-  ('chipeadora','CH-001','Chipeadora 001','activo');
+  ('chipeadora','CH-001','Chipeadora 001','activo')
+on conflict (item_id) do nothing;
