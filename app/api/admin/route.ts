@@ -18,7 +18,8 @@ export async function POST(req: NextRequest) {
 
     if (action === 'createUser') {
       const email = body.email || body.correo;
-      const { password, nombre, rol, especialidad_id } = body;
+      const password = body.password || body.clave;
+      const { nombre, rol, especialidad_id } = body;
       if (!email || !password || !nombre || !rol) {
         return NextResponse.json({ ok: false, error: 'Faltan datos obligatorios' }, { status: 400 });
       }
