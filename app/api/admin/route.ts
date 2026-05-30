@@ -17,9 +17,10 @@ export async function POST(req: NextRequest) {
     const { action } = body;
 
     if (action === 'createUser') {
-      const { email, password, nombre, rol, especialidad_id } = body;
+      const email = body.email || body.correo;
+      const { password, nombre, rol, especialidad_id } = body;
       if (!email || !password || !nombre || !rol) {
-        return NextResponse.json({ ok: false, error: 'Faltan datos' }, { status: 400 });
+        return NextResponse.json({ ok: false, error: 'Faltan datos obligatorios' }, { status: 400 });
       }
       const admin = adminClient();
       const { data, error } = await admin.auth.admin.createUser({
