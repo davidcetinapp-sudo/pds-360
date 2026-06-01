@@ -479,7 +479,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
           {estado==='nuevo'&&<span className="badge bg-slate-200 text-slate-700">Nuevo</span>}
           {estado==='borrador'&&<span className="badge-borrador">Borrador</span>}
           {estado==='enviado'&&<span className="badge-enviado">Enviado</span>}
-          <button className="btn-secondary text-xs" onClick={exportarExcel}>📥 Excel</button>
+          <button className="btn-secondary text-xs" onClick={exportarExcel}>📥 Excel planeación</button>
           <button className="btn-secondary text-xs" onClick={imprimirPlan}>🖨️ PDF / Imprimir</button>
         </div>
       </div>
@@ -1412,40 +1412,53 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
             <MC label="Incidentes" value={(data.incidentes as unknown[]).length} sub="seguridad" color={(data.incidentes as unknown[]).length>0?'text-rose-600':'text-emerald-600'}/>
           </div>
 
-          {/* AVANCE POR ACTIVIDAD */}
+          {/* AVANCE POR ACTIVIDAD — GRÁFICAS */}
           {actividadesConConfig.length>0&&(
             <div className="card p-4">
               <h3 className="font-bold text-[#003b7a] mb-4">📊 Avance por actividad</h3>
-              <div className="space-y-4">
-                {actividadesConConfig.map((c,i)=>(
-                  <div key={i} className="border border-slate-200 rounded-lg p-3">
-                    <div className="flex items-start justify-between flex-wrap gap-2 mb-2">
-                      <div>
-                        <div className="font-semibold text-sm text-[#003b7a]">{c.actividad_nombre}</div>
-                        <div className="text-xs text-slate-500">{c.unidad_es}</div>
+              <div className="space-y-5">
+                {actividadesConConfig.map((c,i)=>{
+                  const pct=c.pct??null;
+                  const color=pct===null?'bg-slate-400':pct>=90?'bg-emerald-500':pct>=50?'bg-blue-500':'bg-amber-500';
+                  const textColor=pct===null?'text-slate-500':pct>=90?'text-emerald-700':pct>=50?'text-blue-700':'text-amber-700';
+                  const bgLight=pct===null?'bg-slate-50':pct>=90?'bg-emerald-50':pct>=50?'bg-blue-50':'bg-amber-50';
+                  const emoji=pct===null?'📋':pct>=90?'✅':pct>=50?'🔵':'⚠️';
+                  return(
+                    <div key={i} className={`rounded-xl border border-slate-200 overflow-hidden`}>
+                      {/* cabecera */}
+                      <div className={`${bgLight} px-4 py-3 flex items-center justify-between flex-wrap gap-2`}>
+                        <div>
+                          <div className="font-bold text-sm text-[#003b7a]">{emoji} {c.actividad_nombre}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">{c.unidad_es||'—'}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-2xl font-black ${textColor}`}>{c.total_acumulado}</div>
+                          {c.meta_total&&c.tiene_meta&&<div className="text-xs text-slate-500">de {c.meta_total} {c.unidad_es}</div>}
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-lg font-bold text-[#003b7a]">{c.total_acumulado}</div>
-                        {c.meta_total&&c.tiene_meta&&<div className="text-xs text-slate-500">de {c.meta_total} · {c.pct}%</div>}
-                      </div>
+                      {/* barra de progreso */}
+                      {c.meta_total&&c.tiene_meta&&pct!==null&&(
+                        <div className="px-4 pb-3 pt-2 bg-white">
+                          <div className="flex justify-between text-xs text-slate-500 mb-1.5">
+                            <span>Acumulado previo: <strong>{c.acumulado_previo||0}</strong></span>
+                            <span>Este período: <strong>+{c.avance_periodo}</strong></span>
+                            <span className={`font-bold text-sm ${textColor}`}>{pct}%</span>
+                          </div>
+                          <div className="w-full bg-slate-200 rounded-full h-5 overflow-hidden relative">
+                            <div className={`h-5 rounded-full transition-all duration-700 ${color}`} style={{width:`${Math.max(2,pct)}%`}}/>
+                            <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow">{pct}% completado</span>
+                          </div>
+                          <div className="flex justify-between text-xs text-slate-400 mt-1">
+                            <span>0</span>
+                            <span>{c.meta_total} {c.unidad_es}</span>
+                          </div>
+                        </div>
+                      )}
+                      {c.tipo==='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-purple-600 italic">Actividad cualitativa — sin meta numérica</div>}
+                      {(!c.meta_total||!c.tiene_meta)&&c.tipo!=='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-slate-500 italic">Acumulativo sin meta · Total ejecutado: {c.total_acumulado} {c.unidad_es}</div>}
                     </div>
-                    {c.meta_total&&c.tiene_meta&&c.pct!==null&&(
-                      <div>
-                        <div className="flex justify-between text-xs text-slate-500 mb-1">
-                          <span>Acumulado previo: {c.acumulado_previo||0}</span>
-                          <span>Este período: +{c.avance_periodo}</span>
-                          <span>{c.pct}%</span>
-                        </div>
-                        <div className="w-full bg-slate-200 rounded-full h-4 overflow-hidden">
-                          <div className={`h-4 rounded-full transition-all duration-500 ${c.pct>=90?'bg-emerald-500':c.pct>=50?'bg-blue-500':'bg-amber-500'}`} style={{width:`${c.pct}%`}}/>
-                        </div>
-                      </div>
-                    )}
-                    {(!c.meta_total||!c.tiene_meta)&&c.tipo!=='D'&&(
-                      <div className="text-xs text-slate-500 italic">Acumulativo sin meta definida · Total: {c.total_acumulado} {c.unidad_es}</div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1540,6 +1553,78 @@ function InformesModule({user,catalogs,configActs,showToast}:{
     finally{ setLoading(false); }
   }
 
+  function imprimirPlan(){
+    if(!data) return;
+    const avances=data.avances as Record<string,unknown>[];
+    const reportes=data.reportes as Record<string,unknown>[];
+    // Agrupar avances por actividad
+    const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;pct:number|null;acum:number;filas:{fecha:string;area:string;hoy:number;acumulado:number}[]}> = {};
+    avances.forEach(av=>{
+      const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
+      const arR=catalogs?.areas.find(a=>a.id===(av.area_id as string));
+      const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
+      const id=av.actividad_id as string;
+      if(!porAct[id]) porAct[id]={nombre:aR?.actividad_es||id,unidad:cfg?.unidad_es||'',meta:cfg?.meta_total||null,pct:null,acum:0,filas:[]};
+      const cantidad=parseFloat(String(av.cantidad||0));
+      const acumTotal=av.acumulado_total_real as number;
+      porAct[id].acum=Math.max(porAct[id].acum,acumTotal);
+      porAct[id].filas.push({fecha:av.fecha as string,area:arR?.area_es||'',hoy:cantidad,acumulado:acumTotal});
+    });
+    Object.values(porAct).forEach(a=>{if(a.meta) a.pct=Math.min(100,Math.round(a.acum/a.meta*100));});
+    const isC=user.rol==='cliente';
+    const resumen=(data.totales as Record<string,unknown>);
+    const actRows=Object.values(porAct).map(a=>{
+      const barW=a.pct??0;
+      const barColor=barW>=90?'#10b981':barW>=50?'#3b82f6':'#f59e0b';
+      const filaRows=a.filas.map(f=>`<tr><td>${f.fecha}</td><td>${f.area}</td><td style="text-align:right;font-weight:600">${f.hoy}</td><td style="text-align:right;color:#003b7a;font-weight:700">${f.acumulado}</td></tr>`).join('');
+      return `<div class="act-block">
+        <div class="act-titulo">${a.nombre} <span class="act-unit">${a.unidad}</span></div>
+        <div class="act-nums">
+          <div class="act-num-box"><div class="act-num-val" style="color:#003b7a">${a.acum}</div><div class="act-num-lbl">Acumulado</div></div>
+          ${a.meta?`<div class="act-num-box"><div class="act-num-val" style="color:#64748b">${a.meta}</div><div class="act-num-lbl">Meta</div></div><div class="act-num-box"><div class="act-num-val" style="color:${barColor}">${a.pct}%</div><div class="act-num-lbl">Avance</div></div>`:''}
+        </div>
+        ${a.meta?`<div class="bar-wrap"><div class="bar-fill" style="width:${Math.max(2,barW)}%;background:${barColor}"></div></div>
+        <div class="bar-labels"><span>0</span><span>${a.meta} ${a.unidad}</span></div>`:''}
+        <table class="det-table"><thead><tr><th>Fecha</th><th>Área</th><th style="text-align:right">Hoy</th><th style="text-align:right">Acumulado</th></tr></thead><tbody>${filaRows}</tbody></table>
+      </div>`;
+    }).join('');
+    const css=`body{font-family:Arial,sans-serif;font-size:11px;color:#1e293b;margin:20px}
+    .hdr{display:flex;align-items:center;gap:12px;border-bottom:3px solid #003b7a;padding-bottom:12px;margin-bottom:16px}
+    .hdr h1{font-size:18px;color:#003b7a;margin:0;font-weight:900}
+    .hdr p{margin:2px 0;font-size:10px;color:#555}
+    .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+    .kpi{border:1px solid #e2e8f0;border-radius:8px;padding:10px;text-align:center}
+    .kpi-val{font-size:22px;font-weight:900;color:#003b7a}
+    .kpi-lbl{font-size:9px;color:#64748b;margin-top:2px}
+    .act-block{border:1px solid #cbd5e1;border-radius:8px;padding:12px;margin-bottom:14px;page-break-inside:avoid}
+    .act-titulo{font-size:13px;font-weight:800;color:#003b7a;margin-bottom:8px}
+    .act-unit{font-size:10px;font-weight:400;color:#94a3b8}
+    .act-nums{display:flex;gap:16px;margin-bottom:8px}
+    .act-num-box{text-align:center}
+    .act-num-val{font-size:20px;font-weight:900}
+    .act-num-lbl{font-size:9px;color:#94a3b8}
+    .bar-wrap{width:100%;background:#e2e8f0;border-radius:999px;height:18px;overflow:hidden;margin-bottom:3px}
+    .bar-fill{height:18px;border-radius:999px;transition:width .5s}
+    .bar-labels{display:flex;justify-content:space-between;font-size:9px;color:#94a3b8;margin-bottom:8px}
+    .det-table{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
+    .det-table th{background:#f1f5f9;text-align:left;padding:3px 6px;font-size:9px;border-bottom:1px solid #e2e8f0}
+    .det-table td{padding:3px 6px;border-bottom:1px solid #f8fafc}
+    .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}`;
+    const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Informe PDS 360</title><style>${css}</style></head><body>
+    <div class="hdr"><div><h1>Powerchina · PDS 360 — Informe de Avance</h1>
+    <p>Período: <strong>${fechaIni}</strong> al <strong>${fechaFin}</strong>${soloAp?' · Solo aprobados':''}</p></div></div>
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-val">${(resumen.dias as number)||0}</div><div class="kpi-lbl">Reportes</div></div>
+      <div class="kpi"><div class="kpi-val">${(resumen.horas_hombre as number)||0}h</div><div class="kpi-lbl">Horas-hombre</div></div>
+      <div class="kpi"><div class="kpi-val">${(resumen.horas_perdidas_clima as number)||0}h</div><div class="kpi-lbl">Horas perdidas</div></div>
+    </div>
+    ${actRows}
+    <div class="ftr">Powerchina PDS 360 · Generado: ${new Date().toLocaleString('es-CO')}</div>
+    </body></html>`;
+    const win=window.open('','_blank');
+    if(win){win.document.write(html);win.document.close();setTimeout(()=>win.print(),600);}
+  }
+
   function exportExcel(){
     if(!data) return;
     const isC=user.rol==='cliente';
@@ -1608,52 +1693,55 @@ function InformesModule({user,catalogs,configActs,showToast}:{
               </div>
             </div>
 
-            {(data.avances as unknown[]).length>0&&(
-              <div className="card p-4">
-                <h3 className="font-bold text-[#003b7a] mb-3">Avance de actividades</h3>
-                <div className="overflow-x-auto">
-                  <table className="table w-full">
-                    <thead>
-                      <tr>
-                        <th>Fecha</th><th>Actividad</th><th>Área</th>
-                        <th>Hoy</th><th>Acumulado</th><th>Meta</th><th>Avance</th><th>Unidad</th>
-                        {user.rol!=='cliente'&&<th>Técnico</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.avances as Record<string,unknown>[]).map((av,i)=>{
-                        const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
-                        const arR=catalogs?.areas.find(a=>a.id===(av.area_id as string));
-                        const rep=(data.reportes as Record<string,unknown>[]).find(r=>r.id===av.reporte_id);
-                        const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
-                        const pct=cfg?.meta_total&&cfg.tiene_meta?Math.round((av.acumulado_total_real as number)/cfg.meta_total*100):null;
-                        return(
-                          <tr key={i}>
-                            <td>{av.fecha as string}</td>
-                            <td>{aR?.actividad_es||av.actividad_id as string}</td>
-                            <td>{arR?.area_es||av.area_id as string}</td>
-                            <td className="font-semibold">{av.cantidad as number}</td>
-                            <td className="font-semibold text-[#003b7a]">{av.acumulado_total_real as number}</td>
-                            <td className="text-slate-500">{cfg?.meta_total||'—'}</td>
-                            <td>
-                              {pct!==null?(
-                                <div className="flex items-center gap-1">
-                                  <div className="w-16 bg-slate-200 rounded-full h-2"><div className={`h-2 rounded-full ${pct>=90?'bg-emerald-500':pct>=50?'bg-blue-500':'bg-amber-500'}`} style={{width:`${pct}%`}}/></div>
-                                  <span className="text-xs font-medium">{pct}%</span>
-                                </div>
-                              ):<span className="text-xs text-slate-400">—</span>}
-                            </td>
-                            <td>{av.unidad as string}</td>
-                            {user.rol!=='cliente'&&<td className="text-xs text-slate-500">{rep?.usuario_nombre as string||''}</td>}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+            {/* AVANCE POR ACTIVIDAD — en pantalla mejorado con meta y % */}
+            {(data.avances as unknown[]).length>0&&(()=>{
+              const avances=data.avances as Record<string,unknown>[];
+              const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;acum:number;pct:number|null}> = {};
+              avances.forEach(av=>{
+                const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
+                const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
+                const id=av.actividad_id as string;
+                if(!porAct[id]) porAct[id]={nombre:aR?.actividad_es||id,unidad:cfg?.unidad_es||'',meta:cfg?.meta_total||null,acum:0,pct:null};
+                porAct[id].acum=Math.max(porAct[id].acum,parseFloat(String(av.acumulado_total_real||0)));
+              });
+              Object.values(porAct).forEach(a=>{if(a.meta)a.pct=Math.min(100,Math.round(a.acum/a.meta*100));});
+              return(
+                <div className="card p-4">
+                  <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad</h3>
+                  <div className="space-y-4">
+                    {Object.values(porAct).map((a,i)=>{
+                      const color=a.pct===null?'bg-slate-400':a.pct>=90?'bg-emerald-500':a.pct>=50?'bg-blue-500':'bg-amber-500';
+                      const tc=a.pct===null?'text-slate-600':a.pct>=90?'text-emerald-700':a.pct>=50?'text-blue-700':'text-amber-700';
+                      return(
+                        <div key={i} className="border border-slate-200 rounded-xl overflow-hidden">
+                          <div className="bg-slate-50 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+                            <div>
+                              <div className="font-bold text-sm text-[#003b7a]">{a.nombre}</div>
+                              <div className="text-xs text-slate-500">{a.unidad}</div>
+                            </div>
+                            <div className="text-right flex gap-6">
+                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.acum}</div><div className="text-xs text-slate-400">Acumulado</div></div>
+                              {a.meta&&<><div className="text-center"><div className="text-xl font-black text-slate-500">{a.meta}</div><div className="text-xs text-slate-400">Meta</div></div>
+                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.pct}%</div><div className="text-xs text-slate-400">Avance</div></div></>}
+                            </div>
+                          </div>
+                          {a.meta&&a.pct!==null&&(
+                            <div className="px-4 pb-3 pt-2 bg-white">
+                              <div className="w-full bg-slate-200 rounded-full h-4 overflow-hidden">
+                                <div className={`h-4 rounded-full ${color}`} style={{width:`${Math.max(2,a.pct)}%`}}/>
+                              </div>
+                              <div className="flex justify-between text-xs text-slate-400 mt-1"><span>0</span><span>{a.meta} {a.unidad}</span></div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
-            {!(data.avances as unknown[]).length&&!loading&&<div className="card p-6 text-center text-slate-500">Sin datos. Consulta primero.</div>}
+              );
+            })()}
+
+            {!(data.avances as unknown[]).length&&<div className="card p-6 text-center text-slate-500">Sin datos de avance para este período. Consulta primero.</div>}
           </>
         )}
         {!data&&<div className="card p-6 text-center text-slate-500">Selecciona el período y haz clic en Consultar.</div>}
