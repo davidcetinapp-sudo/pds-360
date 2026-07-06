@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 // Powerchina PDS 360 v2.2
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { supabase, type Profile, type UserRole } from '@/lib/supabase';
+import { ResponsiveContainer, RadialBarChart, RadialBar, PolarAngleAxis, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, PieChart, Pie, Cell, Legend } from 'recharts';
 import * as XLSX from 'xlsx';
 
 // ── TIPOS ─────────────────────────────────────────────────────────
@@ -2078,11 +2079,25 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
       // Cualitativas
       const cualD=avD.filter(av=>av.unidad==='cualitativo') as Record<string,unknown>[];
 
+      // Avance por día (para la línea de tendencia)
+      const avPorDia:Record<string,number>={};
+      avD.filter(av=>av.unidad!=='cualitativo').forEach(av=>{
+        const f=av.fecha as string;
+        avPorDia[f]=(avPorDia[f]||0)+parseFloat(String(av.cantidad||0));
+      });
+
+      // Incidentes por tipo (para el donut)
+      const incPorTipo:Record<string,number>={};
+      ((incid.data||[]) as Record<string,unknown>[]).forEach(i=>{
+        const t=(i.tipo as string)||'otro';
+        incPorTipo[t]=(incPorTipo[t]||0)+1;
+      });
+
       // Horas maquinaria por novedades
       const{data:novedades}=incluirMaquinaria?await supabase.from('novedades_maquinaria').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin):{data:[]};
       const horasSB=(novedades||[]).reduce((s:number,n:Record<string,unknown>)=>s+parseFloat(String(n.horas_standby||0)),0);
 
-      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
+      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,avance_por_dia:avPorDia,incidentes_por_tipo:incPorTipo,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
   }
@@ -2104,6 +2119,43 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
         return{...c,actividad_nombre:actRow?.actividad_es||c.actividad_id,avance_periodo:avanceHoy,total_acumulado:total,pct};
       });
   },[catalogs,configActs,data,espIds,actIds,espList]);
+
+  const avanceGeneral=useMemo(()=>{
+    const conMeta=actividadesConConfig.filter(a=>a.meta_total&&a.tiene_meta);
+    const sumTotal=conMeta.reduce((s,a)=>s+(a.total_acumulado||0),0);
+    const sumMeta=conMeta.reduce((s,a)=>s+(a.meta_total||0),0);
+    return sumMeta>0?Math.min(100,Math.round(sumTotal/sumMeta*100)):null;
+  },[actividadesConConfig]);
+
+  const tendenciaDiaria=useMemo(()=>{
+    if(!data) return [];
+    const porDia=(data.avance_por_dia||{}) as Record<string,number>;
+    return Object.entries(porDia).sort(([a],[b])=>a.localeCompare(b)).map(([fecha,cantidad])=>({fecha:fecha.slice(5),cantidad}));
+  },[data]);
+
+  const incidentesDonut=useMemo(()=>{
+    if(!data) return [];
+    const porTipo=(data.incidentes_por_tipo||{}) as Record<string,number>;
+    const nombres:Record<string,string>={protesta:'Orden público',logistica:'Logística',falla_equipo:'Falla de equipo',decision:'Decisión dirección',otro:'Otro',accidente:'Accidente',incidente:'Incidente'};
+    return Object.entries(porTipo).map(([tipo,cantidad])=>({tipo:nombres[tipo]||tipo,cantidad}));
+  },[data]);
+
+  const asistenciaPorEsp=useMemo(()=>{
+    if(!data) return [];
+    const asistD=(data.asistencia||[]) as Record<string,unknown>[];
+    const repsD=(data.reportes||[]) as Record<string,unknown>[];
+    const repEspMap:Record<string,string>={};
+    repsD.forEach(r=>{repEspMap[r.id as string]=r.especialidad_id as string;});
+    const porEsp:Record<string,{asistio:number;ausente:number}>={};
+    asistD.forEach(a=>{
+      const espId=repEspMap[a.reporte_id as string]||'';
+      const nom=catalogs?.especialidades_actividades.find(e=>e.id===espId)?.especialidad_es||'Sin especialidad';
+      if(!porEsp[nom]) porEsp[nom]={asistio:0,ausente:0};
+      if(a.asistio) porEsp[nom].asistio++; else porEsp[nom].ausente++;
+    });
+    delete porEsp['Sin especialidad'];
+    return Object.entries(porEsp).map(([especialidad,v])=>({especialidad,...v}));
+  },[data,catalogs]);
 
   return(
     <div className="space-y-4">
@@ -2131,6 +2183,16 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
             <MC label="Horas stand-by" value={incluirMaquinaria?`${data.horas_standby_total as string}h`:'—'} sub="maquinaria"/>
             <MC label="Incidentes" value={(data.incidentes as unknown[]).length} sub="seguridad" color={(data.incidentes as unknown[]).length>0?'text-rose-600':'text-emerald-600'}/>
           </div>
+
+          {/* GAUGES Y DONUT */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {incluirPersonal&&<GaugeCard label="Eficiencia personal" value={data.eficiencia_personal as number} sub="asistencia del período" color={(data.eficiencia_personal as number)>=90?'#10b981':(data.eficiencia_personal as number)>=70?'#f59e0b':'#ef4444'}/>}
+            {avanceGeneral!==null&&<GaugeCard label="Avance general del proyecto" value={avanceGeneral} sub="acumulado vs. meta" color="#003b7a"/>}
+            {incidentesDonut.length>0&&<IncidentDonut data={incidentesDonut}/>}
+          </div>
+
+          {/* LÍNEA DE TENDENCIA DIARIA */}
+          {tendenciaDiaria.length>=2&&<TrendLineCard title="📈 Avance diario del período" data={tendenciaDiaria} dataKey="cantidad" color="#003b7a"/>}
 
           {/* AVANCE POR ACTIVIDAD — GRÁFICAS */}
           {actividadesConConfig.length>0&&(
@@ -2217,6 +2279,9 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
               </div>
             </div>
           )}
+
+          {/* BARRA APILADA ASISTENCIA */}
+          {incluirPersonal&&asistenciaPorEsp.length>0&&<StackedAttendanceChart data={asistenciaPorEsp}/>}
 
           {/* PERSONAL POR ESPECIALIDAD EN DASHBOARD */}
           {data&&((data.asistencia||[]) as unknown[]).length>0&&(()=>{
@@ -2310,6 +2375,88 @@ function MC({label,value,sub,color='text-[#003b7a]'}:{label:string;value:unknown
   return <div className="card p-4 text-center"><div className={`text-2xl sm:text-3xl font-bold ${color}`}>{String(value)}</div><div className="text-xs font-semibold text-slate-700 mt-1">{label}</div><div className="text-xs text-slate-400">{sub}</div></div>;
 }
 
+// ── GAUGE (semicírculo) ─────────────────────────────────────────────
+function GaugeCard({label,value,sub,color='#003b7a'}:{label:string;value:number|null;sub:string;color?:string}){
+  const v=value??0;
+  const data=[{name:label,value:v,fill:color}];
+  return(
+    <div className="card p-4">
+      <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide text-center mb-1">{label}</div>
+      <div className="relative h-32">
+        <ResponsiveContainer width="100%" height="100%">
+          <RadialBarChart innerRadius="70%" outerRadius="100%" barSize={14} data={data} startAngle={180} endAngle={0} cy="85%">
+            <PolarAngleAxis type="number" domain={[0,100]} angleAxisId={0} tick={false}/>
+            <RadialBar background={{fill:'#f1f5f9'}} dataKey="value" cornerRadius={8} angleAxisId={0}/>
+          </RadialBarChart>
+        </ResponsiveContainer>
+        <div className="absolute inset-0 flex items-end justify-center pb-2">
+          <div className="text-center">
+            <div className="text-3xl font-black" style={{color}}>{value===null?'—':`${value}%`}</div>
+          </div>
+        </div>
+      </div>
+      <div className="text-xs text-slate-400 text-center">{sub}</div>
+    </div>
+  );
+}
+
+// ── LÍNEA DE TENDENCIA ────────────────────────────────────────────
+function TrendLineCard({title,data,dataKey,color='#003b7a'}:{title:string;data:Record<string,unknown>[];dataKey:string;color?:string}){
+  return(
+    <div className="card p-4">
+      <h3 className="font-bold text-[#003b7a] mb-3">{title}</h3>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={data} margin={{top:5,right:10,left:-20,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/>
+          <XAxis dataKey="fecha" tick={{fontSize:11,fill:'#64748b'}}/>
+          <YAxis tick={{fontSize:11,fill:'#64748b'}}/>
+          <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/>
+          <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2.5} dot={{r:3,fill:color}}/>
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ── BARRA APILADA ASISTENCIA ──────────────────────────────────────
+function StackedAttendanceChart({data}:{data:{especialidad:string;asistio:number;ausente:number}[]}){
+  return(
+    <div className="card p-4">
+      <h3 className="font-bold text-[#003b7a] mb-3">👥 Asistencia por especialidad</h3>
+      <ResponsiveContainer width="100%" height={Math.max(180,data.length*46)}>
+        <BarChart data={data} layout="vertical" margin={{top:5,right:20,left:10,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false}/>
+          <XAxis type="number" tick={{fontSize:11,fill:'#64748b'}} allowDecimals={false}/>
+          <YAxis type="category" dataKey="especialidad" tick={{fontSize:11,fill:'#334155'}} width={110}/>
+          <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/>
+          <Legend wrapperStyle={{fontSize:12}}/>
+          <Bar dataKey="asistio" name="Asistió" stackId="a" fill="#10b981" radius={[0,4,4,0]}/>
+          <Bar dataKey="ausente" name="Ausente" stackId="a" fill="#f43f5e"/>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ── DONUT INCIDENTES ──────────────────────────────────────────────
+const DONUT_COLORS=['#003b7a','#f59e0b','#ef4444','#10b981','#8b5cf6','#64748b'];
+function IncidentDonut({data}:{data:{tipo:string;cantidad:number}[]}){
+  return(
+    <div className="card p-4">
+      <h3 className="font-bold text-[#003b7a] mb-3">⚠️ Incidentes por tipo</h3>
+      <ResponsiveContainer width="100%" height={220}>
+        <PieChart>
+          <Pie data={data} dataKey="cantidad" nameKey="tipo" innerRadius={50} outerRadius={80} paddingAngle={2}>
+            {data.map((_,i)=><Cell key={i} fill={DONUT_COLORS[i%DONUT_COLORS.length]}/>)}
+          </Pie>
+          <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/>
+          <Legend wrapperStyle={{fontSize:11}}/>
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 // ── INFORMES ──────────────────────────────────────────────────────
 function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
   user:Profile; catalogs:Catalogs|null; configActs:ConfigAct[]; maquinaria:Maq[];
@@ -2327,6 +2474,10 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
+  function nombreMaquina(id:string){
+    const m=maquinaria.find(x=>x.id===id);
+    return m?`${m.item_id||m.nombre||''} (${m.tipo||''})`:'Máquina no encontrada';
+  }
   const actList=useMemo(()=>{
     if(!catalogs) return [];
     if(!espIds.length) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
@@ -2349,7 +2500,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         repIds.length?supabase.from('avance_diario').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
         repIds.length&&incluirPersonal?supabase.from('asistencia_real').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
         repIds.length?supabase.from('suspensiones_clima').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
-        repIds.length&&incluirMaquinaria?supabase.from('novedades_maquinaria').select('*,maquinaria(item_id,tipo,nombre)').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length&&incluirMaquinaria?supabase.from('novedades_maquinaria').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
         repIds.length?supabase.from('actividades_adicionales_reporte').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
       ]);
       let avD=(av.data||[]) as Record<string,unknown>[];
@@ -2491,8 +2642,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
 
       // Maquinaria
       const maqHTML=items.maq.length?`<div class="sec-tit">🚜 Maquinaria</div>${items.maq.map(m=>{
-        const maqInfo=m.maquinaria as Record<string,string>|null;
-        const mn=maqInfo?`${maqInfo.item_id||maqInfo.nombre||''} (${maqInfo.tipo||''})`:m.maquinaria_id as string;
+        const mn=nombreMaquina(m.maquinaria_id as string);
         return `<div class="maq-row"><strong>${mn}</strong>${m.hora_inicio?` · ${m.hora_inicio as string}–${m.hora_fin as string}`:''}${m.descripcion?` · ${m.descripcion as string}`:''}${m.novedad?` · Novedad: ${m.novedad as string}`:''}</div>`;
       }).join('')}`:'';
 
@@ -2581,7 +2731,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     if(suspRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(suspRows),'Suspensiones');
     // Maquinaria
     const maqRows=((data.maquinaria||[]) as Record<string,unknown>[]).map(m=>({
-      Fecha:m.fecha,Maquinaria:m.maquinaria_id,
+      Fecha:m.fecha,Maquinaria:nombreMaquina(m.maquinaria_id as string),
       Hora_inicio:m.hora_inicio||'—',Hora_fin:m.hora_fin||'—',
       Descripcion:m.descripcion||'—',Novedad:(m.novedad as string)||'—',
     }));
@@ -2864,8 +3014,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
                             <div>
                               <div className="text-xs font-semibold text-slate-600 mb-1">🚜 Maquinaria</div>
                               {items.maq.map((m,i)=>{
-                                const maqInfo=m.maquinaria as Record<string,string>|null;
-                                const maqNom=maqInfo?`${maqInfo.item_id||maqInfo.nombre||''} (${maqInfo.tipo||''})`:m.maquinaria_id as string;
+                                const maqNom=nombreMaquina(m.maquinaria_id as string);
                                 return(
                                   <div key={i} className="bg-slate-50 border border-slate-200 rounded-lg p-2 mb-1 text-xs">
                                     <span className="font-medium">{maqNom}</span>
