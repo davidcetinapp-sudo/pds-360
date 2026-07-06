@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 // Powerchina PDS 360 v2.2
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { supabase, type Profile, type UserRole } from '@/lib/supabase';
-import { ResponsiveContainer, RadialBarChart, RadialBar, PolarAngleAxis, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, PieChart, Pie, Cell, Legend } from 'recharts';
+import { ResponsiveContainer, RadialBarChart, RadialBar, PolarAngleAxis, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, PieChart, Pie, Cell, Legend, ComposedChart, ReferenceLine } from 'recharts';
 import * as XLSX from 'xlsx';
 
 // ── TIPOS ─────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ interface Area     { id:string; area_es:string; area_en:string; activo?:boolean;
 interface Lider    { id:string; nombre:string; documento:string; cargo_es:string; activo?:boolean; }
 interface Personal { id:string; nombre:string; documento:string; cargo_es:string; tipo?:string; empresa?:string; activo?:boolean; }
 interface Maq      { id:string; tipo:string; item_id:string; nombre:string; estado:string; horas_acum_operativas?:number; horas_acum_standby?:number; }
-interface ConfigAct{ id:string; actividad_id:string; especialidad_id:string; tipo:string; unidad_es:string; unidad_en?:string; meta_total?:number; tiene_meta?:boolean; es_medible?:boolean; rendimiento_esperado?:number; rendimiento_por?:string; acumulado_previo?:number; tiene_items_unicos?:boolean; }
+interface ConfigAct{ id:string; actividad_id:string; especialidad_id:string; tipo:string; unidad_es:string; unidad_en?:string; meta_total?:number; tiene_meta?:boolean; es_medible?:boolean; rendimiento_esperado?:number; rendimiento_por?:string; acumulado_previo?:number; tiene_items_unicos?:boolean; tipo_grafica?:'barras'|'tendencia'|'curva_s'|'torta'|'gauge'|'ninguna'; }
 interface ItemDatabase { id:string; config_actividad_id:string; nombre:string; columnas:{nombre:string;tipo:string}[]; bloqueo_tipo:'permanente'|'temporal'; activo:boolean; }
 interface ItemDB { id:string; database_id:string; datos:Record<string,string>; bloqueado:boolean; bloqueado_fecha:string|null; bloqueado_en_reporte:string|null; }
 interface Catalogs { especialidades_actividades:EspAct[]; areas:Area[]; lideres:Lider[]; personal:Personal[]; }
@@ -65,6 +65,18 @@ function resumenPorActividad(avances:Record<string,unknown>[], configActs:Config
   });
   Object.values(porAct).forEach(a=>{if(a.meta)a.pct=Math.min(100,Math.round(a.acumuladoHistorico/a.meta*100));});
   return porAct;
+}
+function bucketizeSeries(rows:{fecha:string;cantidad:number}[]){
+  if(!rows.length) return [] as {periodo:string;cantidad:number;acumulado:number}[];
+  const fechas=rows.map(r=>r.fecha).sort();
+  const dias=(new Date(fechas[fechas.length-1]).getTime()-new Date(fechas[0]).getTime())/86400000;
+  const keyFn = dias<=31 ? (f:string)=>f
+    : dias<=180 ? (f:string)=>{const d=new Date(f);const day=(d.getDay()+6)%7;d.setDate(d.getDate()-day);return d.toISOString().slice(0,10);}
+    : (f:string)=>f.slice(0,7);
+  const porPeriodo:Record<string,number>={};
+  rows.forEach(r=>{const k=keyFn(r.fecha);porPeriodo[k]=(porPeriodo[k]||0)+r.cantidad;});
+  let acum=0;
+  return Object.entries(porPeriodo).sort(([a],[b])=>a.localeCompare(b)).map(([periodo,cantidad])=>{acum+=cantidad;return{periodo,cantidad,acumulado:acum};});
 }
 function horasLost(ss:SuspItem[]):number {
   return ss.reduce((a,s)=>{
@@ -2035,6 +2047,7 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
   const[incluirMaquinaria,setIncluirMaquinaria]=useState(false);
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
+  const[historicoPorAct,setHistoricoPorAct]=useState<Record<string,{fecha:string;area_id:string;cantidad:number}[]>>({});
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
   const actList=useMemo(()=>{
     if(!catalogs) return [];
@@ -2042,6 +2055,12 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
     const nombres=new Set(espIds.map(id=>espList.find(e=>e.id===id)?.especialidad_es?.toLowerCase()).filter(Boolean));
     return catalogs.especialidades_actividades.filter(a=>a.activo!==false&&nombres.has((a.especialidad_es||'').toLowerCase()));
   },[catalogs,espIds,espList]);
+
+  async function cargarHistorico(actividadId:string){
+    if(historicoPorAct[actividadId]) return;
+    const{data:rows}=await supabase.from('avance_diario').select('fecha,area_id,cantidad').eq('actividad_id',actividadId).neq('unidad','cualitativo');
+    setHistoricoPorAct(prev=>({...prev,[actividadId]:(rows||[]) as {fecha:string;area_id:string;cantidad:number}[]}));
+  }
 
   async function load(){
     setLoading(true);
@@ -2097,7 +2116,8 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
       const{data:novedades}=incluirMaquinaria?await supabase.from('novedades_maquinaria').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin):{data:[]};
       const horasSB=(novedades||[]).reduce((s:number,n:Record<string,unknown>)=>s+parseFloat(String(n.horas_standby||0)),0);
 
-      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,avance_por_dia:avPorDia,incidentes_por_tipo:incPorTipo,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
+      const avanceRaw=avD.filter(av=>av.unidad!=='cualitativo').map(av=>({fecha:av.fecha as string,actividad_id:av.actividad_id as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}));
+      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,avance_por_dia:avPorDia,avance_raw:avanceRaw,incidentes_por_tipo:incPorTipo,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
   }
@@ -2199,48 +2219,12 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
             <div className="card p-4">
               <h3 className="font-bold text-[#003b7a] mb-4">📊 Avance por actividad</h3>
               <div className="space-y-5">
-                {actividadesConConfig.map((c,i)=>{
-                  const pct=c.pct??null;
-                  const color=pct===null?'bg-slate-400':pct>=90?'bg-emerald-500':pct>=50?'bg-blue-500':'bg-amber-500';
-                  const textColor=pct===null?'text-slate-500':pct>=90?'text-emerald-700':pct>=50?'text-blue-700':'text-amber-700';
-                  const bgLight=pct===null?'bg-slate-50':pct>=90?'bg-emerald-50':pct>=50?'bg-blue-50':'bg-amber-50';
-                  const emoji=pct===null?'📋':pct>=90?'✅':pct>=50?'🔵':'⚠️';
-                  return(
-                    <div key={i} className={`rounded-xl border border-slate-200 overflow-hidden`}>
-                      {/* cabecera */}
-                      <div className={`${bgLight} px-4 py-3 flex items-center justify-between flex-wrap gap-2`}>
-                        <div>
-                          <div className="font-bold text-sm text-[#003b7a]">{emoji} {c.actividad_nombre}</div>
-                          <div className="text-xs text-slate-500 mt-0.5">{c.unidad_es||'—'}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-2xl font-black ${textColor}`}>{c.total_acumulado}</div>
-                          {c.meta_total&&c.tiene_meta&&<div className="text-xs text-slate-500">de {c.meta_total} {c.unidad_es}</div>}
-                        </div>
-                      </div>
-                      {/* barra de progreso */}
-                      {c.meta_total&&c.tiene_meta&&pct!==null&&(
-                        <div className="px-4 pb-3 pt-2 bg-white">
-                          <div className="flex justify-between text-xs text-slate-500 mb-1.5">
-                            <span>Acumulado previo: <strong>{c.acumulado_previo||0}</strong></span>
-                            <span>Este período: <strong>+{c.avance_periodo}</strong></span>
-                            <span className={`font-bold text-sm ${textColor}`}>{pct}%</span>
-                          </div>
-                          <div className="w-full bg-slate-200 rounded-full h-5 overflow-hidden relative">
-                            <div className={`h-5 rounded-full transition-all duration-700 ${color}`} style={{width:`${Math.max(2,pct)}%`}}/>
-                            <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow">{pct}% completado</span>
-                          </div>
-                          <div className="flex justify-between text-xs text-slate-400 mt-1">
-                            <span>0</span>
-                            <span>{c.meta_total} {c.unidad_es}</span>
-                          </div>
-                        </div>
-                      )}
-                      {c.tipo==='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-purple-600 italic">Actividad cualitativa — sin meta numérica</div>}
-                      {(!c.meta_total||!c.tiene_meta)&&c.tipo!=='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-slate-500 italic">Acumulativo sin meta · Total ejecutado: {c.total_acumulado} {c.unidad_es}</div>}
-                    </div>
-                  );
-                })}
+                {actividadesConConfig.map((c,i)=>(
+                  <ActivityChart key={i} c={c} catalogs={catalogs}
+                    rowsRango={((data?.avance_raw||[]) as {fecha:string;actividad_id:string;area_id:string;cantidad:number}[]).filter(r=>r.actividad_id===c.actividad_id)}
+                    rowsCompleto={historicoPorAct[c.actividad_id]}
+                    onNecesitoCompleto={cargarHistorico}/>
+                ))}
               </div>
             </div>
           )}
@@ -2453,6 +2437,143 @@ function IncidentDonut({data}:{data:{tipo:string;cantidad:number}[]}){
           <Legend wrapperStyle={{fontSize:11}}/>
         </PieChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ── GRÁFICA CONFIGURABLE POR ACTIVIDAD ─────────────────────────────
+interface ActConfigConEstado extends ConfigAct { actividad_nombre:string; avance_periodo:number; total_acumulado:number; pct:number|null; }
+function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
+  c:ActConfigConEstado; catalogs:Catalogs|null;
+  rowsRango:{fecha:string;area_id:string;cantidad:number}[];
+  rowsCompleto?:{fecha:string;area_id:string;cantidad:number}[];
+  onNecesitoCompleto:(actividadId:string)=>void;
+}){
+  const[modo,setModo]=useState<'rango'|'completo'>('rango');
+  const tipoG=c.tipo_grafica||'ninguna';
+  const pct=c.pct??null;
+  const color=pct===null?'bg-slate-400':pct>=90?'bg-emerald-500':pct>=50?'bg-blue-500':'bg-amber-500';
+  const textColor=pct===null?'text-slate-500':pct>=90?'text-emerald-700':pct>=50?'text-blue-700':'text-amber-700';
+  const bgLight=pct===null?'bg-slate-50':pct>=90?'bg-emerald-50':pct>=50?'bg-blue-50':'bg-amber-50';
+  const emoji=pct===null?'📋':pct>=90?'✅':pct>=50?'🔵':'⚠️';
+  const gaugeColor=pct===null?'#64748b':pct>=90?'#10b981':pct>=50?'#3b82f6':'#f59e0b';
+
+  function toggleModo(m:'rango'|'completo'){ setModo(m); if(m==='completo') onNecesitoCompleto(c.actividad_id); }
+
+  const rows=modo==='completo'?(rowsCompleto||[]):rowsRango;
+  const serie=useMemo(()=>bucketizeSeries(rows.map(r=>({fecha:r.fecha,cantidad:r.cantidad}))),[rows]);
+  const porArea=useMemo(()=>{
+    const m:Record<string,number>={};
+    rows.forEach(r=>{const nom=catalogs?.areas.find(a=>a.id===r.area_id)?.area_es||'Sin área';m[nom]=(m[nom]||0)+r.cantidad;});
+    return Object.entries(m).map(([area,cantidad])=>({area,cantidad}));
+  },[rows,catalogs]);
+
+  return(
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className={`${bgLight} px-4 py-3 flex items-center justify-between flex-wrap gap-2`}>
+        <div>
+          <div className="font-bold text-sm text-[#003b7a]">{emoji} {c.actividad_nombre}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{c.unidad_es||'—'}</div>
+        </div>
+        <div className="flex items-center gap-3">
+          {tipoG!=='ninguna'&&tipoG!=='gauge'&&(
+            <div className="flex gap-1">
+              <button type="button" onClick={()=>toggleModo('rango')} className={`text-[10px] px-2 py-1 rounded border ${modo==='rango'?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-500'}`}>Rango</button>
+              <button type="button" onClick={()=>toggleModo('completo')} className={`text-[10px] px-2 py-1 rounded border ${modo==='completo'?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-500'}`}>Histórico completo</button>
+            </div>
+          )}
+          <div className="text-right">
+            <div className={`text-2xl font-black ${textColor}`}>{c.total_acumulado}</div>
+            {c.meta_total&&c.tiene_meta&&<div className="text-xs text-slate-500">de {c.meta_total} {c.unidad_es}</div>}
+          </div>
+        </div>
+      </div>
+
+      {tipoG==='ninguna'&&(
+        <>
+          {c.meta_total&&c.tiene_meta&&pct!==null&&(
+            <div className="px-4 pb-3 pt-2 bg-white">
+              <div className="flex justify-between text-xs text-slate-500 mb-1.5">
+                <span>Acumulado previo: <strong>{c.acumulado_previo||0}</strong></span>
+                <span>Este período: <strong>+{c.avance_periodo}</strong></span>
+                <span className={`font-bold text-sm ${textColor}`}>{pct}%</span>
+              </div>
+              <div className="w-full bg-slate-200 rounded-full h-5 overflow-hidden relative">
+                <div className={`h-5 rounded-full transition-all duration-700 ${color}`} style={{width:`${Math.max(2,pct)}%`}}/>
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow">{pct}% completado</span>
+              </div>
+              <div className="flex justify-between text-xs text-slate-400 mt-1"><span>0</span><span>{c.meta_total} {c.unidad_es}</span></div>
+            </div>
+          )}
+          {c.tipo==='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-purple-600 italic">Actividad cualitativa — sin meta numérica</div>}
+          {(!c.meta_total||!c.tiene_meta)&&c.tipo!=='D'&&<div className="px-4 pb-3 pt-1 bg-white text-xs text-slate-500 italic">Acumulativo sin meta · Total ejecutado: {c.total_acumulado} {c.unidad_es}</div>}
+        </>
+      )}
+
+      {tipoG==='gauge'&&(
+        <div className="p-4 bg-white">
+          <div className="relative h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <RadialBarChart innerRadius="70%" outerRadius="100%" barSize={14} data={[{value:pct??0}]} startAngle={180} endAngle={0} cy="85%">
+                <PolarAngleAxis type="number" domain={[0,100]} angleAxisId={0} tick={false}/>
+                <RadialBar background={{fill:'#f1f5f9'}} dataKey="value" cornerRadius={8} angleAxisId={0} fill={gaugeColor}/>
+              </RadialBarChart>
+            </ResponsiveContainer>
+            <div className="absolute inset-0 flex items-end justify-center pb-2">
+              <div className={`text-3xl font-black ${textColor}`}>{pct===null?'—':`${pct}%`}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tipoG==='barras'&&(
+        <div className="p-3 bg-white">
+          {serie.length?<ResponsiveContainer width="100%" height={200}>
+            <BarChart data={serie}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
+              <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/><Bar dataKey="cantidad" fill="#003b7a" radius={[4,4,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>:<p className="text-xs text-slate-400 text-center py-6">Sin datos en este período</p>}
+        </div>
+      )}
+
+      {tipoG==='tendencia'&&(
+        <div className="p-3 bg-white">
+          {serie.length?<ResponsiveContainer width="100%" height={200}>
+            <LineChart data={serie}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
+              <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/><Line type="monotone" dataKey="acumulado" stroke="#003b7a" strokeWidth={2.5} dot={{r:3}}/>
+            </LineChart>
+          </ResponsiveContainer>:<p className="text-xs text-slate-400 text-center py-6">Sin datos en este período</p>}
+        </div>
+      )}
+
+      {tipoG==='curva_s'&&(
+        <div className="p-3 bg-white">
+          {serie.length?<ResponsiveContainer width="100%" height={220}>
+            <ComposedChart data={serie}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
+              <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/><Legend wrapperStyle={{fontSize:11}}/>
+              <Bar dataKey="cantidad" name="Período" fill="#93c5fd" radius={[4,4,0,0]}/>
+              <Line type="monotone" dataKey="acumulado" name="Acumulado" stroke="#003b7a" strokeWidth={2.5} dot={{r:3}}/>
+              {c.meta_total&&<ReferenceLine y={c.meta_total} stroke="#ef4444" strokeDasharray="4 4" label={{value:'Meta',fontSize:10,fill:'#ef4444'}}/>}
+            </ComposedChart>
+          </ResponsiveContainer>:<p className="text-xs text-slate-400 text-center py-6">Sin datos en este período</p>}
+        </div>
+      )}
+
+      {tipoG==='torta'&&(
+        <div className="p-3 bg-white">
+          {porArea.length?<ResponsiveContainer width="100%" height={220}>
+            <PieChart>
+              <Pie data={porArea} dataKey="cantidad" nameKey="area" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                {porArea.map((_,i)=><Cell key={i} fill={DONUT_COLORS[i%DONUT_COLORS.length]}/>)}
+              </Pie>
+              <Tooltip contentStyle={{fontSize:12,borderRadius:8,border:'1px solid #e2e8f0'}}/><Legend wrapperStyle={{fontSize:11}}/>
+            </PieChart>
+          </ResponsiveContainer>:<p className="text-xs text-slate-400 text-center py-6">Sin datos en este período</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -3383,7 +3504,7 @@ function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
   user:Profile; configActs:ConfigAct[]; catalogs:Catalogs|null; onRefresh:()=>void;
   showToast:(k:'ok'|'err'|'info',m:string)=>void;
 }){
-  const[form,setForm]=useState({especialidad_id:'',actividad_id:'',tipo:'A',unidad_es:'',unidad_en:'',meta_total:'',acumulado_previo:'',rendimiento_esperado:'',rendimiento_por:'cuadrilla',tiene_meta:true,es_medible:true});
+  const[form,setForm]=useState({especialidad_id:'',actividad_id:'',tipo:'A',unidad_es:'',unidad_en:'',meta_total:'',acumulado_previo:'',rendimiento_esperado:'',rendimiento_por:'cuadrilla',tiene_meta:true,es_medible:true,tipo_grafica:'ninguna' as 'barras'|'tendencia'|'curva_s'|'torta'|'gauge'|'ninguna'});
   const[busy,setBusy]=useState(false);
   const[dbForm,setDbForm]=useState({nombre:'',bloqueo_tipo:'permanente' as 'permanente'|'temporal',columnas:[{nombre:'ID',tipo:'text'},{nombre:'Nombre',tipo:'text'}] as {nombre:string;tipo:string}[]});
   const[dbBusy,setDbBusy]=useState(false);
@@ -3500,8 +3621,8 @@ function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
 
   function selAct(actId:string){
     const cfg=configActs.find(c=>c.actividad_id===actId);
-    if(cfg) setForm({...form,actividad_id:actId,tipo:cfg.tipo||'A',unidad_es:cfg.unidad_es||'',unidad_en:cfg.unidad_en||'',meta_total:String(cfg.meta_total||''),tiene_meta:cfg.tiene_meta!==false,es_medible:cfg.es_medible!==false,acumulado_previo:String(cfg.acumulado_previo||''),rendimiento_esperado:String(cfg.rendimiento_esperado||'')});
-    else setForm({...form,actividad_id:actId});
+    if(cfg) setForm({...form,actividad_id:actId,tipo:cfg.tipo||'A',unidad_es:cfg.unidad_es||'',unidad_en:cfg.unidad_en||'',meta_total:String(cfg.meta_total||''),tiene_meta:cfg.tiene_meta!==false,es_medible:cfg.es_medible!==false,acumulado_previo:String(cfg.acumulado_previo||''),rendimiento_esperado:String(cfg.rendimiento_esperado||''),tipo_grafica:cfg.tipo_grafica||'ninguna'});
+    else setForm({...form,actividad_id:actId,tipo_grafica:'ninguna'});
   }
 
   async function save(){
@@ -3515,7 +3636,7 @@ function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
         tipo:'D',es_medible:false,tiene_meta:false,meta_total:null,
         unidad_es:'cualitativo',unidad_en:'qualitative',
         tiene_items_unicos:false,rendimiento_esperado:null,rendimiento_por:null,
-        acumulado_previo:0,activo:true,
+        acumulado_previo:0,activo:true,tipo_grafica:'ninguna',
       }:{
         especialidad_id:form.especialidad_id,actividad_id:form.actividad_id,
         tipo:form.tipo,unidad_es:form.unidad_es||'N/A',unidad_en:form.unidad_en||'N/A',
@@ -3524,7 +3645,7 @@ function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
         meta_total:form.tiene_meta&&form.es_medible&&form.meta_total?parseFloat(form.meta_total):null,
         acumulado_previo:parseFloat(form.acumulado_previo||'0'),
         rendimiento_esperado:form.rendimiento_esperado?parseFloat(form.rendimiento_esperado):null,
-        rendimiento_por:form.rendimiento_por,activo:true,
+        rendimiento_por:form.rendimiento_por,activo:true,tipo_grafica:form.tipo_grafica,
       };
       const{error}=await supabase.from('config_actividades').upsert(payload as unknown as Record<string,unknown>,{onConflict:'actividad_id'});
       if(error) throw error;
@@ -3610,6 +3731,21 @@ function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
           </div>
         )}
         {form.tipo==='D'&&<p className="text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded p-2">En el reporte diario, el técnico solo podrá escribir una descripción de lo ejecutado. No se pide cantidad ni área.</p>}
+
+        {form.tipo!=='D'&&(
+          <div>
+            <label className="label">Gráfica en el Dashboard</label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {[{v:'ninguna',l:'Ninguna',d:'Barra de progreso simple'},{v:'barras',l:'📊 Barras',d:'Cantidad por período'},{v:'tendencia',l:'📈 Tendencia',d:'Línea en el tiempo'},{v:'curva_s',l:'📐 Curva S',d:'Barras + acumulado'},{v:'torta',l:'🥧 Torta/Dona',d:'Reparto por área'},{v:'gauge',l:'⏱️ Gauge',d:'% vs meta'}].map(g=>(
+                <button key={g.v} type="button" onClick={()=>setForm({...form,tipo_grafica:g.v as typeof form.tipo_grafica})}
+                  className={`p-2 rounded-lg border text-xs text-left transition-colors ${form.tipo_grafica===g.v?'bg-[#003b7a] text-white border-[#003b7a]':'bg-white border-slate-300 text-slate-700 hover:border-[#003b7a]'}`}>
+                  <div className="font-bold">{g.l}</div>
+                  <div className={`mt-0.5 ${form.tipo_grafica===g.v?'text-blue-200':'text-slate-400'}`}>{g.d}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* BASE DE DATOS DE ÍTEMS */}

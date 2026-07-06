@@ -136,7 +136,7 @@ create table if not exists public.config_actividades (
   id                   uuid primary key default gen_random_uuid(),
   especialidad_id      uuid not null,
   actividad_id         uuid not null references public.especialidades_actividades(id),
-  tipo                 text not null check (tipo in ('A','B','C')),
+  tipo                 text not null check (tipo in ('A','B','C','D')),
   unidad_es            text not null default '',
   unidad_en            text not null default '',
   meta_total           numeric,
@@ -145,6 +145,7 @@ create table if not exists public.config_actividades (
   rendimiento_por      text default 'cuadrilla',
   acumulado_previo     numeric default 0,
   activo               boolean default true,
+  tipo_grafica         text not null default 'ninguna' check (tipo_grafica in ('barras','tendencia','curva_s','torta','gauge','ninguna')),
   created_at           timestamptz default now(),
   unique (actividad_id)
 );
