@@ -78,6 +78,36 @@ function bucketizeSeries(rows:{fecha:string;cantidad:number}[]){
   let acum=0;
   return Object.entries(porPeriodo).sort(([a],[b])=>a.localeCompare(b)).map(([periodo,cantidad])=>{acum+=cantidad;return{periodo,cantidad,acumulado:acum};});
 }
+async function capturarGraficaComoPng(actividadId:string):Promise<string|null>{
+  const cont=document.getElementById(`activity-chart-${actividadId}`);
+  const svg=cont?.querySelector('svg');
+  if(!svg) return null;
+  try{
+    const clone=svg.cloneNode(true) as SVGSVGElement;
+    const rect=svg.getBoundingClientRect();
+    const w=Math.round(rect.width)||600, h=Math.round(rect.height)||220;
+    clone.setAttribute('width',String(w));
+    clone.setAttribute('height',String(h));
+    clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+    const svgStr=new XMLSerializer().serializeToString(clone);
+    const svgB64='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svgStr)));
+    return await new Promise((resolve)=>{
+      const img=new Image();
+      img.onload=()=>{
+        const canvas=document.createElement('canvas');
+        canvas.width=w*2; canvas.height=h*2;
+        const ctx=canvas.getContext('2d');
+        if(!ctx){resolve(null);return;}
+        ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.scale(2,2);
+        ctx.drawImage(img,0,0,w,h);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror=()=>resolve(null);
+      img.src=svgB64;
+    });
+  }catch{ return null; }
+}
 function horasLost(ss:SuspItem[]):number {
   return ss.reduce((a,s)=>{
     if(!s.hora_inicio||!s.hora_fin) return a;
@@ -2511,7 +2541,7 @@ function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
       )}
 
       {tipoG==='gauge'&&(
-        <div className="p-4 bg-white">
+        <div id={`activity-chart-${c.actividad_id}`} className="p-4 bg-white">
           <div className="relative h-32">
             <ResponsiveContainer width="100%" height="100%">
               <RadialBarChart innerRadius="70%" outerRadius="100%" barSize={14} data={[{value:pct??0}]} startAngle={180} endAngle={0} cy="85%">
@@ -2527,7 +2557,7 @@ function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
       )}
 
       {tipoG==='barras'&&(
-        <div className="p-3 bg-white">
+        <div id={`activity-chart-${c.actividad_id}`} className="p-3 bg-white">
           {serie.length?<ResponsiveContainer width="100%" height={200}>
             <BarChart data={serie}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
@@ -2538,7 +2568,7 @@ function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
       )}
 
       {tipoG==='tendencia'&&(
-        <div className="p-3 bg-white">
+        <div id={`activity-chart-${c.actividad_id}`} className="p-3 bg-white">
           {serie.length?<ResponsiveContainer width="100%" height={200}>
             <LineChart data={serie}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
@@ -2549,7 +2579,7 @@ function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
       )}
 
       {tipoG==='curva_s'&&(
-        <div className="p-3 bg-white">
+        <div id={`activity-chart-${c.actividad_id}`} className="p-3 bg-white">
           {serie.length?<ResponsiveContainer width="100%" height={220}>
             <ComposedChart data={serie}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="periodo" tick={{fontSize:10,fill:'#64748b'}}/><YAxis tick={{fontSize:10,fill:'#64748b'}}/>
@@ -2563,7 +2593,7 @@ function ActivityChart({c,catalogs,rowsRango,rowsCompleto,onNecesitoCompleto}:{
       )}
 
       {tipoG==='torta'&&(
-        <div className="p-3 bg-white">
+        <div id={`activity-chart-${c.actividad_id}`} className="p-3 bg-white">
           {porArea.length?<ResponsiveContainer width="100%" height={220}>
             <PieChart>
               <Pie data={porArea} dataKey="cantidad" nameKey="area" innerRadius={45} outerRadius={80} paddingAngle={2}>
@@ -2594,11 +2624,32 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
   const[soloAp,setSoloAp]=useState(false);
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
+  const[historicoPorAct,setHistoricoPorAct]=useState<Record<string,{fecha:string;area_id:string;cantidad:number}[]>>({});
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
   function nombreMaquina(id:string){
     const m=maquinaria.find(x=>x.id===id);
     return m?`${m.item_id||m.nombre||''} (${m.tipo||''})`:'Máquina no encontrada';
   }
+  async function cargarHistorico(actividadId:string){
+    if(historicoPorAct[actividadId]) return;
+    const{data:rows}=await supabase.from('avance_diario').select('fecha,area_id,cantidad').eq('actividad_id',actividadId).neq('unidad','cualitativo');
+    setHistoricoPorAct(prev=>({...prev,[actividadId]:(rows||[]) as {fecha:string;area_id:string;cantidad:number}[]}));
+  }
+  const actividadesConGrafica=useMemo(()=>{
+    if(!catalogs||!data) return [] as ActConfigConEstado[];
+    const avances=(data.avances||[]) as Record<string,unknown>[];
+    return configActs
+      .filter(c=>!actIds.length||actIds.includes(c.actividad_id))
+      .filter(c=>avances.some(av=>av.actividad_id===c.actividad_id))
+      .map(c=>{
+        const actRow=catalogs.especialidades_actividades.find(e=>e.id===c.actividad_id);
+        const filasAct=avances.filter(av=>av.actividad_id===c.actividad_id);
+        const avanceHoy=filasAct.reduce((s,av)=>s+parseFloat(String(av.cantidad||0)),0);
+        const acumHist=filasAct.reduce((mx,av)=>Math.max(mx,parseFloat(String(av.acumulado_total_real||0))),0);
+        const pct=c.meta_total&&c.tiene_meta?Math.min(100,Math.round(acumHist/c.meta_total*100)):null;
+        return{...c,actividad_nombre:actRow?.actividad_es||c.actividad_id,avance_periodo:avanceHoy,total_acumulado:acumHist,pct};
+      });
+  },[catalogs,configActs,data,actIds]);
   const actList=useMemo(()=>{
     if(!catalogs) return [];
     if(!espIds.length) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
@@ -2648,10 +2699,16 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     finally{ setLoading(false); }
   }
 
-  function imprimirPlan(){
+  async function imprimirPlan(){
     try{
     if(!data){showToast('err','No hay datos. Consulta primero.');return;}
     if(!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length){showToast('info','No hay actividades en el período seleccionado');return;}
+    const graficasParaCapturar=actividadesConGrafica.filter(c=>(c.tipo_grafica||'ninguna')!=='ninguna');
+    const imagenesGraficas:Record<string,string|null>={};
+    if(graficasParaCapturar.length){
+      showToast('info','Generando gráficas para el PDF…');
+      await Promise.all(graficasParaCapturar.map(async c=>{ imagenesGraficas[c.actividad_id]=await capturarGraficaComoPng(c.actividad_id); }));
+    }
     const avances=data.avances as Record<string,unknown>[];
     const cual=((data.cualitativas||[]) as Record<string,unknown>[]);
     const adic=((data.adicionales||[]) as Record<string,unknown>[]);
@@ -2709,12 +2766,20 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     .tbl tr:last-child td{border-bottom:none}
     .susp-row{background:#fef9c3;border:1px solid #fde68a;border-radius:4px;padding:4px 8px;margin-bottom:4px;font-size:9px}
     .maq-row{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:4px 8px;margin-bottom:4px;font-size:9px}
+    .chart-block{margin-bottom:12px;page-break-inside:avoid}
+    .chart-tit{font-weight:700;color:#003b7a;font-size:10px;margin-bottom:4px}
+    .chart-img{width:100%;max-width:650px;border:1px solid #e2e8f0;border-radius:6px}
     .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}`;
 
     const gruposHTML=Object.entries(porEsp).map(([espNom,items])=>{
       // Resumen por actividad — total del rango seleccionado (siempre incluido)
       const porActEsp=resumenPorActividad(items.avances,configActs,catalogs);
       const resumenHTML=Object.keys(porActEsp).length?`<div class="sec-tit">📊 Resumen del período</div><table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody>${Object.values(porActEsp).map(a=>`<tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr>`).join('')}</tbody></table>`:'';
+
+      // Gráficas por actividad configuradas en Config. Act.
+      const idsActEsp=new Set(items.avances.map(av=>av.actividad_id as string));
+      const graficasEsp=graficasParaCapturar.filter(c=>idsActEsp.has(c.actividad_id)&&imagenesGraficas[c.actividad_id]);
+      const graficasHTML=graficasEsp.length?`<div class="sec-tit">📈 Gráficas</div>${graficasEsp.map(c=>`<div class="chart-block"><div class="chart-tit">${c.actividad_nombre}</div><img src="${imagenesGraficas[c.actividad_id]}" class="chart-img"/></div>`).join('')}`:'';
 
       // Avances por fecha — solo en modo Detallado
       const porFecha:Record<string,Record<string,unknown>[]>={};
@@ -2767,7 +2832,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         return `<div class="maq-row"><strong>${mn}</strong>${m.hora_inicio?` · ${m.hora_inicio as string}–${m.hora_fin as string}`:''}${m.descripcion?` · ${m.descripcion as string}`:''}${m.novedad?` · Novedad: ${m.novedad as string}`:''}</div>`;
       }).join('')}`:'';
 
-      return `<div class="esp-block"><div class="esp-tit">🌿 ${espNom}</div>${resumenHTML}${fechasHTML}${cualHTML}${adicHTML}${isCliente?'':personalHTML}${isCliente?'':suspsHTML}${isCliente?'':maqHTML}</div>`;
+      return `<div class="esp-block"><div class="esp-tit">🌿 ${espNom}</div>${resumenHTML}${graficasHTML}${fechasHTML}${cualHTML}${adicHTML}${isCliente?'':personalHTML}${isCliente?'':suspsHTML}${isCliente?'':maqHTML}</div>`;
     }).join('');
 
     const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Informe PDS 360</title><style>${css}</style></head><body>
@@ -2820,8 +2885,15 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
       Acumulado_Historico:a.acumuladoHistorico,Meta:a.meta||'—',
       Avance_Pct:a.pct!==null?`${a.pct}%`:'—',
     }));
+    // Detalle por período (día/semana/mes) por actividad con gráfica configurada — para armar la gráfica en Excel
+    const detalleRows:Record<string,unknown>[]=[];
+    actividadesConGrafica.filter(c=>(c.tipo_grafica||'ninguna')!=='ninguna').forEach(c=>{
+      const filas=avances.filter(av=>av.actividad_id===c.actividad_id).map(av=>({fecha:av.fecha as string,cantidad:parseFloat(String(av.cantidad||0))}));
+      bucketizeSeries(filas).forEach(s=>detalleRows.push({Actividad:c.actividad_nombre,Periodo:s.periodo,Cantidad:s.cantidad,Acumulado:s.acumulado}));
+    });
     const wb=XLSX.utils.book_new();
     if(resumenRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(resumenRows),'Resumen');
+    if(detalleRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(detalleRows),'Detalle por período');
     if(modo==='detallado') XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Avance');
     if(cualRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(cualRows),'Cualitativas');
     if(adicRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(adicRows),'Adicionales');
@@ -2913,45 +2985,19 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
             </div>
 
             {/* AVANCE POR ACTIVIDAD — resumen del rango, siempre visible */}
-            {(data.avances as unknown[]).length>0&&(()=>{
-              const avances=data.avances as Record<string,unknown>[];
-              const porAct=resumenPorActividad(avances,configActs,catalogs);
-              return(
-                <div className="card p-4">
-                  <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad — {fechaIni} a {fechaFin}</h3>
-                  <div className="space-y-4">
-                    {Object.values(porAct).map((a,i)=>{
-                      const color=a.pct===null?'bg-slate-400':a.pct>=90?'bg-emerald-500':a.pct>=50?'bg-blue-500':'bg-amber-500';
-                      const tc=a.pct===null?'text-slate-600':a.pct>=90?'text-emerald-700':a.pct>=50?'text-blue-700':'text-amber-700';
-                      return(
-                        <div key={i} className="border border-slate-200 rounded-xl overflow-hidden">
-                          <div className="bg-slate-50 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
-                            <div>
-                              <div className="font-bold text-sm text-[#003b7a]">{a.nombre}</div>
-                              <div className="text-xs text-slate-500">{a.unidad}</div>
-                            </div>
-                            <div className="text-right flex gap-6">
-                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.totalRango}</div><div className="text-xs text-slate-400">Total del rango</div></div>
-                              <div className="text-center"><div className="text-xl font-black text-slate-500">{a.acumuladoHistorico}</div><div className="text-xs text-slate-400">Acumulado histórico</div></div>
-                              {a.meta&&<><div className="text-center"><div className="text-xl font-black text-slate-500">{a.meta}</div><div className="text-xs text-slate-400">Meta</div></div>
-                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.pct}%</div><div className="text-xs text-slate-400">Avance</div></div></>}
-                            </div>
-                          </div>
-                          {a.meta&&a.pct!==null&&(
-                            <div className="px-4 pb-3 pt-2 bg-white">
-                              <div className="w-full bg-slate-200 rounded-full h-4 overflow-hidden">
-                                <div className={`h-4 rounded-full ${color}`} style={{width:`${Math.max(2,a.pct)}%`}}/>
-                              </div>
-                              <div className="flex justify-between text-xs text-slate-400 mt-1"><span>0</span><span>{a.meta} {a.unidad}</span></div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+            {actividadesConGrafica.length>0&&(
+              <div className="card p-4">
+                <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad — {fechaIni} a {fechaFin}</h3>
+                <div className="space-y-5">
+                  {actividadesConGrafica.map((c,i)=>(
+                    <ActivityChart key={i} c={c} catalogs={catalogs}
+                      rowsRango={((data.avances||[]) as Record<string,unknown>[]).filter(av=>av.actividad_id===c.actividad_id).map(av=>({fecha:av.fecha as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}))}
+                      rowsCompleto={historicoPorAct[c.actividad_id]}
+                      onNecesitoCompleto={cargarHistorico}/>
+                  ))}
                 </div>
-              );
-            })()}
+              </div>
+            )}
 
             {/* Vista agrupada por especialidad > fecha — el día a día respeta el modo, personal/maquinaria no */}
             {(()=>{
