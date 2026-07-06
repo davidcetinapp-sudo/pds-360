@@ -1,4 +1,5 @@
 'use client';
+export const dynamic = 'force-dynamic';
 // Powerchina PDS 360 v2.2
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase, type Profile, type UserRole } from '@/lib/supabase';
@@ -12,13 +13,18 @@ interface Area     { id:string; area_es:string; area_en:string; activo?:boolean;
 interface Lider    { id:string; nombre:string; documento:string; cargo_es:string; activo?:boolean; }
 interface Personal { id:string; nombre:string; documento:string; cargo_es:string; tipo?:string; empresa?:string; activo?:boolean; }
 interface Maq      { id:string; tipo:string; item_id:string; nombre:string; estado:string; horas_acum_operativas?:number; horas_acum_standby?:number; }
-interface ConfigAct{ id:string; actividad_id:string; especialidad_id:string; tipo:string; unidad_es:string; unidad_en?:string; meta_total?:number; tiene_meta?:boolean; es_medible?:boolean; rendimiento_esperado?:number; rendimiento_por?:string; acumulado_previo?:number; }
+interface ConfigAct{ id:string; actividad_id:string; especialidad_id:string; tipo:string; unidad_es:string; unidad_en?:string; meta_total?:number; tiene_meta?:boolean; es_medible?:boolean; rendimiento_esperado?:number; rendimiento_por?:string; acumulado_previo?:number; tiene_items_unicos?:boolean; }
+interface ItemDatabase { id:string; config_actividad_id:string; nombre:string; columnas:{nombre:string;tipo:string}[]; bloqueo_tipo:'permanente'|'temporal'; activo:boolean; }
+interface ItemDB { id:string; database_id:string; datos:Record<string,string>; bloqueado:boolean; bloqueado_fecha:string|null; bloqueado_en_reporte:string|null; }
 interface Catalogs { especialidades_actividades:EspAct[]; areas:Area[]; lideres:Lider[]; personal:Personal[]; }
 interface Notif    { id:string; titulo:string; mensaje:string; leida:boolean; created_at:string; }
 interface SuspItem { uid:string; tipo_susp:string; otro_desc:string; hora_inicio:string; hora_fin:string; descripcion:string; }
-interface AsistItem{ personal_id:string; documento_personal:string; nombre:string; cargo_es:string; asistio:boolean; motivo_ausencia:string; }
+interface SuspActividad { uid:string; actividad_id:string; tipo:string; otro_desc:string; parcial:boolean; hora_inicio:string; hora_fin:string; observacion:string; }
+interface AsistItem{ personal_id:string; documento_personal:string; nombre:string; cargo_es:string; asistio:boolean; motivo_ausencia:string; ausencia_parcial:boolean; hora_ausencia_ini:string; hora_ausencia_fin:string; jornada_parcial:boolean; hora_jornada_ini:string; hora_jornada_fin:string; es_adicional?:boolean; }
 interface AreaRep  { uid:string; area_id:string; cantidad:string; }
-interface ActRep   { uid:string; actividad_id:string; areas:AreaRep[]; descripcion_cualitativa:string; observacion_es:string; }
+interface ActRep   { uid:string; actividad_id:string; areas:AreaRep[]; descripcion_cualitativa:string; observacion_es:string; items_seleccionados:string[]; }
+interface ActAdicCat { id:string; nombre:string; veces_usada:number; }
+interface ActAdicItem { uid:string; nombre:string; descripcion:string; catalogoId:string|null; }
 interface PersSel  { personal_id:string; documento_personal:string; }
 interface ActForm  {
   uid:string; especialidad_id:string; actividad_id:string;
@@ -46,6 +52,20 @@ function actsForEsp(rows:EspAct[], espId:string):EspAct[] {
   const t = (e.especialidad_es||'').toLowerCase();
   return rows.filter(r=>(r.especialidad_es||'').toLowerCase()===t);
 }
+function resumenPorActividad(avances:Record<string,unknown>[], configActs:ConfigAct[], catalogs:Catalogs|null){
+  const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;totalRango:number;acumuladoHistorico:number;pct:number|null}> = {};
+  avances.forEach(av=>{
+    const id=av.actividad_id as string;
+    const aR=catalogs?.especialidades_actividades.find(e=>e.id===id);
+    const cfg=configActs.find(c=>c.actividad_id===id);
+    if(!porAct[id]) porAct[id]={nombre:aR?.actividad_es||id,unidad:cfg?.unidad_es||'',meta:cfg?.meta_total||null,totalRango:0,acumuladoHistorico:0,pct:null};
+    porAct[id].totalRango+=parseFloat(String(av.cantidad||0));
+    porAct[id].acumuladoHistorico=Math.max(porAct[id].acumuladoHistorico,parseFloat(String(av.acumulado_total_real||0)));
+  });
+  Object.values(porAct).forEach(a=>{if(a.meta)a.pct=Math.min(100,Math.round(a.acumuladoHistorico/a.meta*100));});
+  return porAct;
+}
+function toggle(arr:string[],setArr:(v:string[])=>void,val:string){setArr(arr.includes(val)?arr.filter(x=>x!==val):[...arr,val]);}
 function horasLost(ss:SuspItem[]):number {
   return ss.reduce((a,s)=>{
     if(!s.hora_inicio||!s.hora_fin) return a;
@@ -53,6 +73,11 @@ function horasLost(ss:SuspItem[]):number {
     const[fh,fm]=s.hora_fin.split(':').map(Number);
     return a+Math.max(0,(fh+fm/60)-(ih+im/60));
   },0);
+}
+function calcHoras(ini:string,fin:string):number{
+  const[h1,m1]=ini.split(':').map(Number);
+  const[h2,m2]=fin.split(':').map(Number);
+  return Math.max(0,(h2*60+m2-h1*60-m1)/60);
 }
 function emptyAct():ActForm {
   return { uid:gid(), especialidad_id:'', actividad_id:'', area_id:'', areas_adicionales:[], lider_id:'', maquinaria_ids:[], rendimiento_esperado:'', observacion_es:'', observacion_en:'', personal:[] };
@@ -137,23 +162,34 @@ export default function App() {
   if(!profile) return <LoginScreen onLogin={setProfile} showToast={showToast} toast={toast}/>;
 
   const u=profile;
-  const canEdit=u.rol==='admin'||u.rol==='lider'||u.rol==='tecnico';
-  const canApprove=u.rol==='admin'||u.rol==='lider';
+  const canEdit=['admin','lider','tecnico'].includes(u.rol);
+  const canPlanear=['admin','lider','tecnico','gerencia','cliente'].includes(u.rol);
+  const canReporte=['admin','lider','tecnico','gerencia'].includes(u.rol);
+  const canApprove=['admin','lider'].includes(u.rol);
+  const canViewReports=['admin','lider','tecnico','gerencia','cliente'].includes(u.rol);
+  const canViewDashboard=['admin','lider','tecnico','gerencia','cliente','visualizador'].includes(u.rol);
+
+  function cambiarVista(v:AppView){
+    if(u.rol==='visualizador'&&v!=='dashboard'&&v!=='home'){
+      showToast('info','Tu rol solo permite ver el Dashboard');return;
+    }
+    setView(v);
+  }
 
   return(
     <div className="min-h-screen flex flex-col">
-      <Header user={u} onLogout={handleLogout} setView={setView} currentView={view} notifs={notifs} onReadNotifs={marcarLeidas}/>
+      <Header user={u} onLogout={handleLogout} setView={cambiarVista} currentView={view} notifs={notifs} onReadNotifs={marcarLeidas}/>
       <main className="flex-1 p-3 sm:p-5 max-w-7xl mx-auto w-full">
-        {view==='home'       &&<HomeScreen user={u} setView={setView} notifs={notifs}/>}
-        {view==='planear'    &&canEdit&&<PlaneacionModule user={u} catalogs={catalogs} maquinaria={maquinaria} showToast={showToast}/>}
-        {view==='reporte'    &&canEdit&&<ReporteModule user={u} catalogs={catalogs} maquinaria={maquinaria} configActs={configActs} showToast={showToast}/>}
+        {view==='home'       &&<HomeScreen user={u} setView={cambiarVista} notifs={notifs}/>}
+        {view==='planear'    &&canPlanear&&<PlaneacionModule user={u} catalogs={catalogs} maquinaria={maquinaria} showToast={showToast} readOnly={u.rol==='cliente'}/>}
+        {view==='reporte'    &&canReporte&&<ReporteModule user={u} catalogs={catalogs} maquinaria={maquinaria} configActs={configActs} showToast={showToast}/>}
         {view==='aprobacion' &&canApprove&&<AprobacionModule user={u} catalogs={catalogs} configActs={configActs} showToast={showToast} onRefreshNotifs={()=>loadNotifs(u.id)}/>}
-        {view==='solicitudes'&&<SolicitudesModule user={u} catalogs={catalogs} showToast={showToast}/>}
-        {view==='dashboard'  &&<DashboardModule catalogs={catalogs} configActs={configActs} showToast={showToast}/>}
-        {view==='informes'   &&<InformesModule user={u} catalogs={catalogs} configActs={configActs} showToast={showToast}/>}
+        {view==='solicitudes'&&canApprove&&<SolicitudesModule user={u} catalogs={catalogs} showToast={showToast}/>}
+        {view==='dashboard'  &&canViewDashboard&&<DashboardModule catalogs={catalogs} configActs={configActs} showToast={showToast}/>}
+        {view==='informes'   &&canViewReports&&<InformesModule user={u} catalogs={catalogs} configActs={configActs} maquinaria={maquinaria} showToast={showToast}/>}
         {view==='catalogos'  &&u.rol==='admin'&&<CatalogosModule catalogs={catalogs} onRefresh={loadCatalogs} showToast={showToast}/>}
         {view==='maquinaria' &&u.rol==='admin'&&<MaquinariaModule maquinaria={maquinaria} onRefresh={loadCatalogs} showToast={showToast}/>}
-        {view==='config_act' &&u.rol==='admin'&&<ConfigActModule configActs={configActs} catalogs={catalogs} onRefresh={loadCatalogs} showToast={showToast}/>}
+        {view==='config_act' &&u.rol==='admin'&&<ConfigActModule user={u} configActs={configActs} catalogs={catalogs} onRefresh={loadCatalogs} showToast={showToast}/>}
         {view==='usuarios'   &&u.rol==='admin'&&<UsuariosModule showToast={showToast}/>}
       </main>
       <Toast toast={toast}/>
@@ -168,20 +204,18 @@ function Header({user,onLogout,setView,currentView,notifs,onReadNotifs}:{
   currentView:AppView; notifs:Notif[]; onReadNotifs:()=>void;
 }){
   const[showN,setShowN]=useState(false);
-  const canEdit=user.rol==='admin'||user.rol==='lider'||user.rol==='tecnico';
-  const canApprove=user.rol==='admin'||user.rol==='lider';
   const tabs=[
-    {key:'home' as AppView,label:'Inicio',show:true},
-    {key:'planear' as AppView,label:'Planear',show:canEdit},
-    {key:'reporte' as AppView,label:'Reporte',show:canEdit},
-    {key:'aprobacion' as AppView,label:'✅ Aprobar',show:canApprove},
-    {key:'solicitudes' as AppView,label:'Solicitudes',show:true},
-    {key:'dashboard' as AppView,label:'Dashboard',show:true},
-    {key:'informes' as AppView,label:'Informes',show:true},
-    {key:'catalogos' as AppView,label:'Catálogos',show:user.rol==='admin'},
-    {key:'maquinaria' as AppView,label:'Maquinaria',show:user.rol==='admin'},
-    {key:'config_act' as AppView,label:'Config. Act.',show:user.rol==='admin'},
-    {key:'usuarios' as AppView,label:'Usuarios',show:user.rol==='admin'},
+    {key:'home'      as AppView,label:'Inicio',     labelEn:'Home',       show:true},
+    {key:'planear'   as AppView,label:'Planear',    labelEn:'Planning',   show:['admin','lider','tecnico','gerencia','cliente'].includes(user.rol)},
+    {key:'reporte'   as AppView,label:'Reporte',    labelEn:'Report',     show:['admin','lider','tecnico','gerencia'].includes(user.rol)},
+    {key:'aprobacion'as AppView,label:'Aprobar',    labelEn:'Approve',    show:['admin','lider'].includes(user.rol)},
+    {key:'solicitudes'as AppView,label:'Solicitudes',labelEn:'Requests',  show:['admin','lider'].includes(user.rol)},
+    {key:'dashboard' as AppView,label:'Dashboard',  labelEn:'Dashboard',  show:['admin','lider','tecnico','gerencia','cliente','visualizador'].includes(user.rol)},
+    {key:'informes'  as AppView,label:'Informes',   labelEn:'Reports',    show:['admin','lider','tecnico','gerencia','cliente'].includes(user.rol)},
+    {key:'catalogos' as AppView,label:'Catálogos',  labelEn:'Catalogs',   show:user.rol==='admin'},
+    {key:'maquinaria'as AppView,label:'Maquinaria', labelEn:'Machinery',  show:user.rol==='admin'},
+    {key:'config_act'as AppView,label:'Config. Act.',labelEn:'Act. Config',show:user.rol==='admin'},
+    {key:'usuarios'  as AppView,label:'Usuarios',   labelEn:'Users',      show:user.rol==='admin'},
   ];
   return(
     <header className="bg-[#003b7a] text-white shadow no-print">
@@ -212,14 +246,18 @@ function Header({user,onLogout,setView,currentView,notifs,onReadNotifs}:{
             )}
           </div>
           <div className="hidden sm:block text-right"><div className="font-medium text-sm">{user.nombre}</div><div className="text-xs text-blue-200 uppercase">{user.rol}</div></div>
-          <button className="btn-secondary text-xs" onClick={onLogout}>Salir</button>
+          <button className="btn-secondary text-xs" onClick={onLogout}>
+            <span className="block">Salir</span>
+            <span className="block text-blue-300 opacity-70" style={{fontSize:'8px'}}>Log out</span>
+          </button>
         </div>
       </div>
       <nav className="max-w-7xl mx-auto px-2 overflow-x-auto">
         <div className="flex gap-0.5">{tabs.filter(t=>t.show).map(t=>(
           <button key={t.key} onClick={()=>setView(t.key)}
-            className={`px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-colors ${currentView===t.key?'border-white text-white':'border-transparent text-blue-200 hover:text-white'}`}>
-            {t.label}
+            className={`px-3 py-1.5 text-xs font-medium border-b-2 whitespace-nowrap transition-colors flex flex-col items-center ${currentView===t.key?'border-white text-white':'border-transparent text-blue-200 hover:text-white'}`}>
+            <span>{t.label}</span>
+            <span className="text-blue-300 opacity-70" style={{fontSize:'9px'}}>{t.labelEn}</span>
           </button>
         ))}</div>
       </nav>
@@ -277,8 +315,8 @@ function LoginScreen({onLogin,showToast,toast}:{
 
 // ── HOME ──────────────────────────────────────────────────────────
 function HomeScreen({user,setView,notifs}:{user:Profile;setView:(v:AppView)=>void;notifs:Notif[]}){
-  const canEdit=user.rol==='admin'||user.rol==='lider'||user.rol==='tecnico';
-  const canApprove=user.rol==='admin'||user.rol==='lider';
+  const canEdit=['admin','lider','tecnico'].includes(user.rol);
+  const canApprove=['admin','lider'].includes(user.rol);
   return(
     <div className="space-y-6">
       <div className="text-center py-4">
@@ -321,9 +359,10 @@ function QBtn({icon,label,onClick}:{icon:string;label:string;onClick:()=>void}){
 }
 
 // ── PLANEACIÓN ────────────────────────────────────────────────────
-function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
+function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
   user:Profile; catalogs:Catalogs|null; maquinaria:Maq[];
   showToast:(k:'ok'|'err'|'info',m:string)=>void;
+  readOnly?:boolean;
 }){
   const[fecha,setFecha]=useState(today());
   const[actividades,setActividades]=useState<ActForm[]>([emptyAct()]);
@@ -332,14 +371,167 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
   const[saving,setSaving]=useState(false);
   const[progId,setProgId]=useState<string|null>(null);
 
+  // Export por rango
+  const[showRange,setShowRange]=useState(false);
+  const[rangeIni,setRangeIni]=useState(today());
+  const[rangeFin,setRangeFin]=useState(today());
+  const[rangeEsps,setRangeEsps]=useState<string[]>([]);
+  const[rangeLoading,setRangeLoading]=useState(false);
+  const espListRange=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[], [catalogs]);
+
+  async function fetchRangeData(){
+    setRangeLoading(true);
+    try{
+      let qP=supabase.from('programaciones').select('*').gte('fecha',rangeIni).lte('fecha',rangeFin);
+      if(rangeEsps.length) qP=qP.in('especialidad_id',rangeEsps);
+      const{data:progs}=await qP;
+      if(!progs?.length){showToast('info','Sin planeaciones en ese rango');return null;}
+      const progIds=(progs as Record<string,unknown>[]).map(p=>p.id as string);
+      const{data:acts}=await supabase.from('actividades_programadas').select('*').in('programacion_id',progIds);
+      if(!acts?.length){showToast('info','Sin actividades en ese rango');return null;}
+      const actIds=(acts as Record<string,unknown>[]).map(a=>a.id as string);
+      const{data:paRaw}=await supabase.from('personal_asignado').select('*').in('actividad_programada_id',actIds);
+      const persIds=[...new Set((paRaw||[]).map((p:Record<string,unknown>)=>p.personal_id as string))];
+      let persMap:Record<string,{nombre:string;cargo_es:string}>={};
+      if(persIds.length){
+        const{data:pData}=await supabase.from('personal').select('id,nombre,cargo_es').in('id',persIds);
+        (pData||[]).forEach((p:Record<string,unknown>)=>{persMap[p.id as string]={nombre:p.nombre as string,cargo_es:p.cargo_es as string};});
+      }
+      const pa=(paRaw||[]).map((p:Record<string,unknown>)=>({...p,personal:persMap[p.personal_id as string]||{nombre:p.documento_personal as string,cargo_es:''}}));
+      return{progs:progs as Record<string,unknown>[],acts:acts as Record<string,unknown>[],pa:pa as Record<string,unknown>[]};
+    } catch(e:unknown){showToast('err',(e as Error)?.message||'Error cargando datos');return null;}
+    finally{setRangeLoading(false);}
+  }
+
+  async function exportRangeExcel(){
+    const d=await fetchRangeData(); if(!d||!catalogs) return;
+    const rows:Record<string,unknown>[]=[];
+    d.acts.forEach(a=>{
+      const prog=d.progs.find(p=>p.id===a.programacion_id as string);
+      const espRow=catalogs.especialidades_actividades.find(e=>e.id===a.especialidad_id as string);
+      const actRow=catalogs.especialidades_actividades.find(e=>e.id===a.actividad_id as string);
+      const areaRow=catalogs.areas.find(ar=>ar.id===a.area_id as string);
+      const liderRow=catalogs.lideres.find(l=>l.id===a.lider_id as string);
+      const areasAd=((a.areas_adicionales as string[])||[]).map(id=>catalogs.areas.find(ar=>ar.id===id)?.area_es||id).join(', ');
+      const maqStr=((a.maquinaria_ids as string[])||[]).map(id=>{const mq=maquinaria.find(x=>x.id===id);return mq?(mq.nombre||`${mq.item_id} (${mq.tipo})`):id;}).join(', ');
+      const persAct=d.pa.filter(p=>p.actividad_programada_id===a.id as string);
+      const persNombres=persAct.map(p=>{const ps=p.personal as Record<string,unknown>;return`${ps?.nombre||p.documento_personal} (${ps?.cargo_es||''})`;}).join(', ');
+      rows.push({
+        Fecha:prog?.fecha||'',Especialidad:espRow?.especialidad_es||'',Actividad:actRow?.actividad_es||'',
+        'Área Principal':areaRow?.area_es||'','Áreas Adicionales':areasAd,
+        Líder:liderRow?.nombre||'',Personal:persNombres,Maquinaria:maqStr,
+        'Rendimiento Esperado':a.rendimiento_esperado||'',Observaciones:a.observacion_es||'',
+      });
+    });
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Planeacion');
+    XLSX.writeFile(wb,`Planeacion_${rangeIni}_${rangeFin}.xlsx`);
+    showToast('ok','Excel descargado');
+  }
+
+  async function exportRangePDF(){
+    const d=await fetchRangeData(); if(!d||!catalogs) return;
+    const css=`
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:Arial,sans-serif;font-size:11px;color:#1e293b;padding:20px}
+      .hdr{border-bottom:3px solid #003b7a;padding-bottom:12px;margin-bottom:16px}
+      .hdr h1{font-size:18px;color:#003b7a;font-weight:900}
+      .hdr-meta{font-size:10px;color:#64748b;margin-top:4px}
+      .hdr-meta strong{color:#1e293b}
+      .fecha-bloque{margin-bottom:20px}
+      .fecha-titulo{background:#f1f5f9;border-left:4px solid #003b7a;padding:6px 12px;font-weight:800;font-size:12px;color:#003b7a;margin-bottom:10px}
+      .act-card{border:1px solid #e2e8f0;border-radius:8px;margin-bottom:12px;overflow:hidden;page-break-inside:avoid}
+      .act-header{background:#003b7a;color:white;padding:7px 14px;font-size:11px;font-weight:700;display:flex;align-items:center;gap:8px}
+      .act-header .act-num{font-size:10px;opacity:0.8;font-weight:400}
+      .act-body{padding:12px 14px}
+      .meta-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px}
+      .meta-item label{font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:2px}
+      .meta-item span{font-size:11px;font-weight:700;color:#1e293b}
+      .meta-item.wide{grid-column:span 2}
+      .maq-row{background:#fef9c3;border:1px solid #fde68a;border-radius:6px;padding:6px 10px;font-size:10px;margin-bottom:10px}
+      .maq-row label{color:#92400e;font-weight:700;margin-right:6px}
+      .personal-titulo{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;font-weight:700;margin-bottom:4px}
+      .personal-table{width:100%;border-collapse:collapse;font-size:10px}
+      .personal-table th{background:#f8fafc;text-align:left;padding:4px 8px;font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0}
+      .personal-table td{padding:4px 8px;border-bottom:1px solid #f8fafc}
+      .personal-table tr:last-child td{border-bottom:none}
+      .num-cell{color:#94a3b8;font-size:9px}
+      .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:24px;border-top:1px solid #e2e8f0;padding-top:8px}
+    `;
+    const byDate:Record<string,Record<string,unknown>[]>={};
+    d.acts.forEach(a=>{
+      const prog=d.progs.find(p=>p.id===a.programacion_id as string);
+      const f2=prog?.fecha as string||'';
+      if(!byDate[f2]) byDate[f2]=[];
+      byDate[f2].push(a);
+    });
+    const bloquesHTML=Object.entries(byDate).sort(([a],[b])=>a.localeCompare(b)).map(([fch,acts])=>{
+      const tarjetas=acts.map((act,idx)=>{
+        const actRow=catalogs.especialidades_actividades.find(e=>e.id===act.actividad_id as string);
+        const areaRow=catalogs.areas.find(ar=>ar.id===act.area_id as string);
+        const liderRow=catalogs.lideres.find(l=>l.id===act.lider_id as string);
+        const areasAdic=((act.areas_adicionales as string[])||[]).map(id=>catalogs.areas.find(ar=>ar.id===id)?.area_es||id);
+        const areasAdicStr=areasAdic.length?` + ${areasAdic.join(', ')}`: '';
+        const maqList=((act.maquinaria_ids as string[])||[]).map(id=>{const mq=maquinaria.find(x=>x.id===id);return mq?(mq.nombre||`${mq.item_id} (${mq.tipo})`):id;});
+        const maqHTML=maqList.length?`<div class="maq-row"><label>🚜 Maquinaria:</label>${maqList.join(' · ')}</div>`:'';
+        const persAct=d.pa.filter(p=>p.actividad_programada_id===act.id as string);
+        const personalFilas=persAct.map((p,i)=>{
+          const ps=p.personal as Record<string,unknown>;
+          return `<tr><td class="num-cell">${i+1}</td><td><strong>${ps?.nombre as string||'—'}</strong></td><td>${p.documento_personal as string||'—'}</td><td>${ps?.cargo_es as string||'—'}</td></tr>`;
+        }).join('');
+        return `
+          <div class="act-card">
+            <div class="act-header">
+              <span>${actRow?.actividad_es||'Actividad'}</span>
+              <span class="act-num">Actividad ${idx+1}</span>
+            </div>
+            <div class="act-body">
+              <div class="meta-grid">
+                <div class="meta-item"><label>Especialidad</label><span>${actRow?.especialidad_es||'—'}</span></div>
+                <div class="meta-item"><label>Área principal</label><span>${areaRow?.area_es||'—'}${areasAdicStr}</span></div>
+                <div class="meta-item"><label>Líder</label><span>${liderRow?.nombre||'—'}</span></div>
+                ${act.rendimiento_esperado?`<div class="meta-item"><label>Rendimiento esperado</label><span>${act.rendimiento_esperado as string}</span></div>`:''}
+                ${act.observacion_es?`<div class="meta-item wide"><label>Observación</label><span style="font-weight:400">${act.observacion_es as string}</span></div>`:''}
+              </div>
+              ${maqHTML}
+              ${persAct.length?`
+              <div class="personal-titulo">👥 Personal asignado</div>
+              <table class="personal-table">
+                <thead><tr><th>N</th><th>Nombre</th><th>Documento</th><th>Cargo</th></tr></thead>
+                <tbody>${personalFilas}</tbody>
+              </table>`:'<div style="font-size:10px;color:#94a3b8;font-style:italic">Sin personal asignado</div>'}
+            </div>
+          </div>`;
+      }).join('');
+      return `<div class="fecha-bloque"><div class="fecha-titulo">📅 ${fch}</div>${tarjetas}</div>`;
+    }).join('');
+    const totalPersonal=new Set(d.pa.map(p=>p.documento_personal as string)).size;
+    const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Planeación PDS 360</title><style>${css}</style></head><body>
+      <div class="hdr">
+        <h1>Powerchina · PDS 360 — Planeación</h1>
+        <div class="hdr-meta">Período: <strong>${rangeIni}</strong> al <strong>${rangeFin}</strong> &nbsp;·&nbsp; Actividades: <strong>${d.acts.length}</strong> &nbsp;·&nbsp; Personal único: <strong>${totalPersonal}</strong></div>
+      </div>
+      ${bloquesHTML}
+      <div class="ftr">Powerchina PDS 360 · Generado: ${new Date().toLocaleString('es-CO')}</div>
+    </body></html>`;
+    const win=window.open('','_blank');
+    if(win){win.document.write(html);win.document.close();setTimeout(()=>win.print(),600);}
+  }
+
   const loadFecha=useCallback(async()=>{
     if(!fecha) return;
     const{data:bl}=await supabase.from('personal_asignado')
-      .select('documento_personal,usuario_id,programaciones!inner(usuario_nombre)')
+      .select('documento_personal,usuario_id')
       .eq('fecha',fecha).neq('usuario_id',user.id);
+    const docsBlocked=[...new Set((bl||[]).map((b:Record<string,unknown>)=>b.documento_personal as string))];
+    let blockedNames:Record<string,string>={};
+    if(docsBlocked.length){
+      const{data:persB}=await supabase.from('personal').select('documento,nombre').in('documento',docsBlocked);
+      (persB||[]).forEach((p:Record<string,unknown>)=>{blockedNames[p.documento as string]=p.nombre as string;});
+    }
     setBlocked((bl||[]).map((b:Record<string,unknown>)=>({
       documento_personal:b.documento_personal as string,
-      usuario_nombre:((b.programaciones as Record<string,unknown>)?.usuario_nombre as string)||'otro',
+      usuario_nombre:blockedNames[b.documento_personal as string]||b.documento_personal as string,
     })));
     const{data:prog}=await supabase.from('programaciones').select('*').eq('fecha',fecha).eq('usuario_id',user.id).maybeSingle();
     if(prog){
@@ -372,7 +564,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
     return m;
   },[blocked]);
 
-  const isRO=estado==='enviado';
+  const isRO=estado==='enviado'||readOnly;
 
   async function save(est:'borrador'|'enviado'){
     for(let i=0;i<actividades.length;i++){
@@ -435,7 +627,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
       const areaRow=catalogs.areas.find(ar=>ar.id===a.area_id);
       const liderRow=catalogs.lideres.find(l=>l.id===a.lider_id);
       const areasAd=(a.areas_adicionales||[]).map(id=>catalogs.areas.find(ar=>ar.id===id)?.area_es||id).join(", ");
-      const maqNombres=(a.maquinaria_ids||[]).map(id=>maquinaria.find(m=>m.id===id)?.item_id||id).join(", ");
+      const maqNombres=(a.maquinaria_ids||[]).map(id=>{const mq=maquinaria.find(x=>x.id===id);return mq?(mq.nombre||`${mq.item_id} (${mq.tipo})`):id;}).join(", ");
       if(!a.personal.length){
         rows.push({"N°Act":idx+1,Fecha:fecha,Especialidad:espRow?.especialidad_es||"",Actividad:actRow?.actividad_es||"","Area principal":areaRow?.area_es||"","Areas adicionales":areasAd,Lider:liderRow?.nombre||"",Maquinaria:maqNombres,Nombre:"",Documento:"",Cargo:""});
       } else {
@@ -458,7 +650,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
       const areaRow=catalogs.areas.find(ar=>ar.id===a.area_id);
       const liderRow=catalogs.lideres.find(l=>l.id===a.lider_id);
       const areasAd=(a.areas_adicionales||[]).map(id=>catalogs.areas.find(ar=>ar.id===id)?.area_es||id).join(", ");
-      const maqNombres=(a.maquinaria_ids||[]).map(id=>maquinaria.find(m=>m.id===id)?.item_id||id).join(", ");
+      const maqNombres=(a.maquinaria_ids||[]).map(id=>{const mq=maquinaria.find(x=>x.id===id);return mq?(mq.nombre||`${mq.item_id} (${mq.tipo})`):id;}).join(", ");
       const persRows=a.personal.map((ps,pi)=>{
         const p=catalogs.personal.find(x=>x.id===ps.personal_id);
         return "<tr><td>"+(pi+1)+"</td><td>"+(p?.nombre||ps.documento_personal)+"</td><td>"+(p?.documento||ps.documento_personal)+"</td><td>"+(p?.cargo_es||"")+"</td></tr>";
@@ -473,20 +665,57 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
 
   return(
     <div className="space-y-4">
+      {readOnly&&(
+        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-center gap-3">
+          <span className="text-blue-500 text-lg">👁️</span>
+          <div>
+            <div className="font-semibold text-sm text-blue-800">Vista de solo lectura / Read-only view</div>
+            <div className="text-xs text-blue-600">Puedes consultar la planeación pero no puedes editarla · You can view the planning but not edit it</div>
+          </div>
+        </div>
+      )}
       <div className="card p-4 flex flex-col sm:flex-row gap-3 items-end justify-between flex-wrap">
         <div className="flex-1 min-w-[160px]"><label className="label">Fecha</label><input type="date" className="input" value={fecha} onChange={e=>setFecha(e.target.value)}/></div>
         <div className="flex items-center gap-3 flex-wrap">
           {estado==='nuevo'&&<span className="badge bg-slate-200 text-slate-700">Nuevo</span>}
           {estado==='borrador'&&<span className="badge-borrador">Borrador</span>}
           {estado==='enviado'&&<span className="badge-enviado">Enviado</span>}
-          <button className="btn-secondary text-xs" onClick={exportarExcel}>📥 Excel planeación</button>
-          <button className="btn-secondary text-xs" onClick={imprimirPlan}>🖨️ PDF / Imprimir</button>
+          <button className="btn-secondary text-xs" onClick={exportarExcel}>📥 Excel día</button>
+          <button className="btn-secondary text-xs" onClick={imprimirPlan}>🖨️ PDF día</button>
+          <button className="btn-secondary text-xs" onClick={()=>setShowRange(v=>!v)}>📅 Exportar por rango</button>
         </div>
       </div>
+
+      {showRange&&(
+        <div className="card p-4 space-y-3 border-2 border-blue-200 bg-blue-50">
+          <h4 className="font-bold text-[#003b7a] text-sm">📅 Exportar planeación por rango</h4>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end">
+            <div><label className="label">Desde</label><input type="date" className="input" value={rangeIni} onChange={e=>setRangeIni(e.target.value)}/></div>
+            <div><label className="label">Hasta</label><input type="date" className="input" value={rangeFin} onChange={e=>setRangeFin(e.target.value)}/></div>
+          </div>
+          <div>
+            <label className="label">Especialidades (vacío = todas)</label>
+            <div className="flex flex-wrap gap-2">
+              {espListRange.map(e=>(
+                <button key={e.id} onClick={()=>setRangeEsps(prev=>prev.includes(e.id)?prev.filter(x=>x!==e.id):[...prev,e.id])}
+                  className={`text-xs px-2 py-1 rounded border transition-colors ${rangeEsps.includes(e.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>
+                  {e.especialidad_es}
+                </button>
+              ))}
+              {rangeEsps.length>0&&<button className="text-xs text-slate-500 underline" onClick={()=>setRangeEsps([])}>Limpiar</button>}
+            </div>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <button className="btn-primary text-xs" disabled={rangeLoading} onClick={exportRangeExcel}>{rangeLoading?'Cargando…':'📥 Excel por rango'}</button>
+            <button className="btn-secondary text-xs" disabled={rangeLoading} onClick={exportRangePDF}>{rangeLoading?'Cargando…':'🖨️ PDF por rango'}</button>
+          </div>
+        </div>
+      )}
 
       {actividades.map((a,idx)=>(
         <ActCard key={a.uid} index={idx} act={a} catalogs={catalogs} maquinaria={maquinaria}
           blockedMap={blockedMap} readOnly={isRO}
+          otherUsedPersonalIds={actividades.filter(x=>x.uid!==a.uid).flatMap(x=>x.personal.map(p=>p.personal_id))}
           onChange={p=>setActividades(arr=>arr.map(x=>x.uid===a.uid?{...x,...p}:x))}
           onRemove={()=>setActividades(arr=>arr.length<=1?arr:arr.filter(x=>x.uid!==a.uid))}/>
       ))}
@@ -501,9 +730,9 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast}:{
 }
 
 // ── ActCard CON PANEL RESUMEN ─────────────────────────────────────
-function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onRemove}:{
+function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,otherUsedPersonalIds,onChange,onRemove}:{
   index:number; act:ActForm; catalogs:Catalogs|null; maquinaria:Maq[];
-  blockedMap:Record<string,string>; readOnly:boolean;
+  blockedMap:Record<string,string>; readOnly:boolean; otherUsedPersonalIds:string[];
   onChange:(p:Partial<ActForm>)=>void; onRemove:()=>void;
 }){
   const[search,setSearch]=useState('');
@@ -525,6 +754,7 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onR
 
   const liderSel=useMemo(()=>lideresActivos.find(l=>l.id===act.lider_id),[lideresActivos,act.lider_id]);
   const areaSel=useMemo(()=>(catalogs?.areas||[]).find(a=>a.id===act.area_id),[catalogs,act.area_id]);
+  const actNombre=useMemo(()=>acts.find(a=>a.id===act.actividad_id)?.actividad_es||null,[acts,act.actividad_id]);
 
   // Panel resumen — personal seleccionado
   const persSelDetalle=useMemo(()=>
@@ -609,7 +839,7 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onR
                 return <button key={m.id} disabled={readOnly}
                   onClick={()=>onChange({maquinaria_ids:sel?act.maquinaria_ids.filter(x=>x!==m.id):[...act.maquinaria_ids,m.id]})}
                   className={`text-xs px-2 py-1 rounded border transition-colors ${sel?'bg-orange-500 text-white border-orange-500':'border-slate-300 text-slate-600 hover:border-orange-400'}`}>
-                  {m.item_id}
+                  {m.nombre||`${m.item_id} (${m.tipo})`}
                 </button>;
               })}
             </div>
@@ -625,9 +855,10 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onR
               {persFilt.map(p=>{
                 const sel=!!act.personal.find(x=>x.documento_personal===p.documento);
                 const bl=blockedMap[p.documento];
+                const inOtherAct=!bl&&otherUsedPersonalIds.includes(p.id);
                 return(
                   <div key={p.id} className="relative group">
-                    <label className={`flex items-center gap-2 px-3 py-2 border-b border-slate-100 cursor-pointer text-sm ${bl?'bg-rose-50 cursor-not-allowed':sel?'bg-blue-50':'hover:bg-slate-50'}`}>
+                    <label className={`flex items-center gap-2 px-3 py-2 border-b border-slate-100 cursor-pointer text-sm ${bl?'bg-rose-50 cursor-not-allowed':inOtherAct&&!sel?'bg-orange-50':sel?'bg-blue-50':'hover:bg-slate-50'}`}>
                       <input type="checkbox" checked={sel} disabled={readOnly||!!bl}
                         onChange={()=>onChange({personal:sel?act.personal.filter(x=>x.documento_personal!==p.documento):[...act.personal,{personal_id:p.id,documento_personal:p.documento}]})}/>
                       <div className="flex-1 min-w-0">
@@ -635,9 +866,11 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onR
                         <div className="text-xs text-slate-500">{p.documento} · {p.cargo_es}</div>
                       </div>
                       {bl&&<span className="text-xs text-rose-500 font-medium flex-shrink-0">🔒 {bl}</span>}
+                      {inOtherAct&&!sel&&<span className="text-xs text-orange-500 font-medium flex-shrink-0">⚡ Otra act.</span>}
                       {sel&&!bl&&<span className="badge bg-blue-100 text-blue-800 flex-shrink-0">✓</span>}
                     </label>
                     {bl&&<div className="absolute left-0 bottom-full mb-1 hidden group-hover:block z-20 bg-slate-800 text-white text-xs rounded p-2 shadow-lg whitespace-nowrap">Asignado por: <strong>{bl}</strong></div>}
+                    {inOtherAct&&!bl&&<div className="absolute left-0 bottom-full mb-1 hidden group-hover:block z-20 bg-orange-700 text-white text-xs rounded p-2 shadow-lg whitespace-nowrap">Ya planificado en otra actividad de este día</div>}
                   </div>
                 );
               })}
@@ -646,16 +879,17 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,onChange,onR
         </div>
 
         {/* PANEL RESUMEN — derecho */}
-        <div className="lg:w-64 border-t lg:border-t-0 lg:border-l border-slate-200 bg-slate-50 p-4 flex-shrink-0">
+        <div className="lg:w-64 border-t lg:border-t-0 lg:border-l border-slate-200 bg-slate-50 p-4 flex-shrink-0 lg:sticky lg:top-4 lg:self-start">
           <div className="text-xs font-bold text-[#003b7a] uppercase mb-3">📋 Resumen</div>
 
           <div className="space-y-2 text-xs">
+            {actNombre&&<div><span className="text-slate-400">Actividad:</span> <span className="font-medium text-[#003b7a]">{actNombre}</span></div>}
             <div><span className="text-slate-400">Área:</span> <span className="font-medium">{areaSel?.area_es||'—'}</span></div>
             <div><span className="text-slate-400">Líder:</span> <span className="font-medium">{liderSel?.nombre||'—'}</span>{liderSel&&<div className="text-slate-500">{liderSel.cargo_es}</div>}</div>
 
             {maqSel.length>0&&(
               <div><span className="text-slate-400">Maquinaria:</span>
-                <div className="flex flex-wrap gap-1 mt-1">{maqSel.map(m=><span key={m.id} className="badge bg-orange-100 text-orange-700">{m.item_id}</span>)}</div>
+                <div className="flex flex-wrap gap-1 mt-1">{maqSel.map(m=><span key={m.id} className="badge bg-orange-100 text-orange-700">{m.nombre||`${m.item_id} (${m.tipo})`}</span>)}</div>
               </div>
             )}
 
@@ -692,12 +926,20 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
   const[charla,setCharla]=useState(true);
   const[charlaTema,setCharlaTema]=useState('');
   const[asistencia,setAsistencia]=useState<AsistItem[]>([]);
-  const[maqDia,setMaqDia]=useState<{maquinaria_id:string;nombre:string;novedad:boolean;descripcion:string;hora_inicio:string;hora_fin:string;horas_standby:number}[]>([]);
+  const[maqDia,setMaqDia]=useState<{uid:string;maquinaria_id:string;nombre:string;uso:'si'|'no'|null;planeada:boolean;es_adicional:boolean;parcial:boolean;hora_inicio:string;hora_fin:string;tiene_novedad:boolean;novedad:string}[]>([]);
+  const[suspPorActividad,setSuspPorActividad]=useState<SuspActividad[]>([]);
   const[actReps,setActReps]=useState<ActRep[]>([]);
   const[incidente,setIncidente]=useState({tipo:'sin_novedad',descripcion:'',medidas:''});
   const[notaBit,setNotaBit]=useState('');
   const[saving,setSaving]=useState(false);
   const[solicitudOk,setSolicitudOk]=useState(false);
+  const[itemDbs,setItemDbs]=useState<Record<string,{db:ItemDatabase;items:ItemDB[]}>>({}); // keyed by config_actividad_id
+  const[itemDbSearch,setItemDbSearch]=useState<Record<string,string>>({});
+  const[actAdicionales,setActAdicionales]=useState<ActAdicItem[]>([]);
+  const[catAdicionales,setCatAdicionales]=useState<ActAdicCat[]>([]);
+  const[mostrarFormAdicional,setMostrarFormAdicional]=useState(false);
+  const[nuevaAdicionalNombre,setNuevaAdicionalNombre]=useState('');
+  const[nuevaAdicionalDesc,setNuevaAdicionalDesc]=useState('');
 
   const horasClima=useMemo(()=>horasLost(susps),[susps]);
   const horasReal=Math.max(0,jornadaHrs-horasClima);
@@ -711,35 +953,83 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
         .eq('tecnico_id',user.id).eq('fecha_reporte',fecha).eq('estado','aprobado').maybeSingle()
         .then(({data})=>setSolicitudOk(!!data));
     } else { setSolicitudOk(false); }
-    supabase.from('personal_asignado').select('personal_id,documento_personal,personal!inner(nombre,cargo_es)').eq('fecha',fecha)
-      .then(({data})=>{
-        const seen=new Set<string>();
-        setAsistencia((data||[]).filter((r:Record<string,unknown>)=>{
-          const doc=r.documento_personal as string;
-          if(seen.has(doc)) return false; seen.add(doc); return true;
-        }).map((r:Record<string,unknown>)=>{
-          const pers=r.personal as Record<string,unknown>;
-          return { personal_id:r.personal_id as string, documento_personal:r.documento_personal as string, nombre:(pers?.nombre as string)||r.documento_personal as string, cargo_es:(pers?.cargo_es as string)||'', asistio:true, motivo_ausencia:'' };
-        }));
-      });
-  },[fecha,espId,user.id,esDiaAnt]);
+    (async()=>{
+      const espRow=catalogs?.especialidades_actividades.find(e=>e.id===espId);
+      const espName=(espRow?.especialidad_es||'').trim().toLowerCase();
+      const espIds=espName&&catalogs?catalogs.especialidades_actividades.filter(e=>(e.especialidad_es||'').trim().toLowerCase()===espName).map(e=>e.id):[espId];
+      const{data:acts}=await supabase.from('actividades_programadas').select('id').eq('fecha',fecha).in('especialidad_id',espIds.length?espIds:[espId]);
+      if(!acts?.length){setAsistencia([]);return;}
+      const actIds=(acts as Record<string,unknown>[]).map(a=>a.id as string);
+      const{data:paData}=await supabase.from('personal_asignado').select('personal_id,documento_personal').in('actividad_programada_id',actIds);
+      const personalIds=[...new Set((paData||[]).map(p=>(p as Record<string,unknown>).personal_id as string))];
+      let personalMap:Record<string,{nombre:string;cargo_es:string}>={};
+      if(personalIds.length){
+        const{data:pers}=await supabase.from('personal').select('id,nombre,cargo_es').in('id',personalIds);
+        (pers||[]).forEach((p:Record<string,unknown>)=>{personalMap[p.id as string]={nombre:p.nombre as string,cargo_es:p.cargo_es as string};});
+      }
+      const seen=new Set<string>();
+      setAsistencia((paData||[]).filter((r:Record<string,unknown>)=>{
+        const doc=r.documento_personal as string;
+        if(seen.has(doc)) return false; seen.add(doc); return true;
+      }).map((r:Record<string,unknown>)=>{
+        const info=personalMap[r.personal_id as string]||{nombre:r.documento_personal as string,cargo_es:''};
+        return { personal_id:r.personal_id as string, documento_personal:r.documento_personal as string, nombre:info.nombre, cargo_es:info.cargo_es, asistio:true, motivo_ausencia:'', ausencia_parcial:false, hora_ausencia_ini:'', hora_ausencia_fin:'', jornada_parcial:false, hora_jornada_ini:'', hora_jornada_fin:'', es_adicional:false };
+      }));
+    })();
+  },[fecha,espId,user.id,esDiaAnt,catalogs]);
 
   useEffect(()=>{
-    setMaqDia(maquinaria.filter(m=>m.estado==='activo').map(m=>({maquinaria_id:m.id,nombre:`${m.item_id} – ${m.tipo}`,novedad:false,descripcion:'',hora_inicio:'',hora_fin:'',horas_standby:0})));
-  },[maquinaria]);
+    if(!fecha||!espId) return;
+    async function loadMaqPlaneada(){
+      const espRow=catalogs?.especialidades_actividades.find(e=>e.id===espId);
+      const espName=(espRow?.especialidad_es||'').trim().toLowerCase();
+      const espIds=espName&&catalogs?catalogs.especialidades_actividades.filter(e=>(e.especialidad_es||'').trim().toLowerCase()===espName).map(e=>e.id):[espId];
+      const{data:plans}=await supabase.from('actividades_programadas').select('maquinaria_ids').eq('fecha',fecha).in('especialidad_id',espIds.length?espIds:[espId]);
+      const allIds=[...new Set((plans||[]).flatMap(p=>(p.maquinaria_ids||[]) as string[]))];
+      if(allIds.length){
+        const{data:maqRows}=await supabase.from('maquinaria').select('*').in('id',allIds);
+        setMaqDia((maqRows||[]).map(m=>({uid:gid(),maquinaria_id:m.id as string,nombre:(m.nombre as string)||`${m.item_id as string} (${m.tipo as string})`,uso:null,planeada:true,es_adicional:false,parcial:false,hora_inicio:'',hora_fin:'',tiene_novedad:false,novedad:''})));
+      } else {
+        setMaqDia([]);
+      }
+    }
+    loadMaqPlaneada();
+  },[fecha,espId,catalogs]);
 
   useEffect(()=>{
     if(!catalogs||!espId) return;
     const espRow=catalogs.especialidades_actividades.find(e=>e.id===espId);
     if(!espRow) return;
-    const t=(espRow.especialidad_es||'').toLowerCase();
-    const acts=catalogs.especialidades_actividades.filter(e=>(e.especialidad_es||'').toLowerCase()===t&&e.activo!==false);
-    setActReps(acts.map(a=>({uid:gid(),actividad_id:a.id,areas:[{uid:gid(),area_id:'',cantidad:''}],descripcion_cualitativa:'',observacion_es:''})));
+    const t=(espRow.especialidad_es||'').trim().toLowerCase();
+    const acts=catalogs.especialidades_actividades.filter(e=>(e.especialidad_es||'').trim().toLowerCase()===t&&e.activo!==false);
+    setActReps(acts.map(a=>({uid:gid(),actividad_id:a.id,areas:[{uid:gid(),area_id:'',cantidad:''}],descripcion_cualitativa:'',observacion_es:'',items_seleccionados:[]})));
+    setSuspPorActividad([]);
+    setActAdicionales([]);
+    setMaqDia([]);
   },[catalogs,espId]);
+
+  useEffect(()=>{
+    if(step!==6) return;
+    supabase.from('actividades_adicionales_catalogo').select('*').eq('activo',true).order('veces_usada',{ascending:false}).limit(50)
+      .then(({data})=>{ if(data) setCatAdicionales(data as ActAdicCat[]); });
+    const cfgsConItems=configActs.filter(c=>c.tiene_items_unicos);
+    if(!cfgsConItems.length) return;
+    cfgsConItems.forEach(async(cfg)=>{
+      if(itemDbs[cfg.id]) return; // ya cargado
+      try{
+        const{data:dbs}=await supabase.from('item_databases').select('*').eq('config_actividad_id',cfg.id).eq('activo',true);
+        if(!dbs?.length) return;
+        const db=dbs[0] as ItemDatabase;
+        const{data:items}=await supabase.from('items_database').select('*').eq('database_id',db.id);
+        setItemDbs(prev=>({...prev,[cfg.id]:{db,items:(items||[]) as ItemDB[]}}));
+      } catch{}
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[step]);
 
   async function submit(){
     if(!fecha||!espId){showToast('err','Falta fecha o especialidad');return;}
-    if(esDiaAnt&&!solicitudOk){showToast('err','Necesitas aprobación para reportar día anterior. Ve a Solicitudes.');return;}
+    if(esDiaAnt&&!solicitudOk&&user.rol!=='admin'){showToast('err','Necesitas aprobación para reportar día anterior. Ve a Solicitudes.');return;}
     setSaving(true);
     try{
       const{data:rep,error:re}=await supabase.from('reportes_avance').insert({
@@ -760,12 +1050,22 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
           reporte_id:rid,fecha,usuario_id:user.id,
           personal_id:a.personal_id,documento_personal:a.documento_personal,
           asistio:a.asistio,motivo_ausencia:a.motivo_ausencia||null,
-          horas_trabajadas:a.asistio?horasReal:0,
+          horas_trabajadas:a.asistio?(a.jornada_parcial&&a.hora_jornada_ini&&a.hora_jornada_fin?calcHoras(a.hora_jornada_ini,a.hora_jornada_fin):horasReal):0,
+          ausencia_parcial:a.ausencia_parcial||false,
+          hora_ausencia_ini:a.ausencia_parcial&&a.hora_ausencia_ini?a.hora_ausencia_ini:null,
+          hora_ausencia_fin:a.ausencia_parcial&&a.hora_ausencia_fin?a.hora_ausencia_fin:null,
+          jornada_parcial:a.jornada_parcial||false,
+          hora_jornada_ini:a.jornada_parcial&&a.hora_jornada_ini?a.hora_jornada_ini:null,
+          hora_jornada_fin:a.jornada_parcial&&a.hora_jornada_fin?a.hora_jornada_fin:null,
+          es_adicional:a.es_adicional||false,
         }))):null,
-        maqDia.filter(m=>m.novedad).length?supabase.from('novedades_maquinaria').insert(
-          maqDia.filter(m=>m.novedad).map(m=>({
+        maqDia.filter(m=>m.uso==='si').length?supabase.from('novedades_maquinaria').insert(
+          maqDia.filter(m=>m.uso==='si').map(m=>({
             reporte_id:rid,fecha,usuario_id:user.id,maquinaria_id:m.maquinaria_id,
-            descripcion:m.descripcion,hora_inicio:m.hora_inicio||null,hora_fin:m.hora_fin||null,horas_standby:m.horas_standby,
+            descripcion:m.tiene_novedad?m.novedad:'',
+            hora_inicio:m.parcial&&m.hora_inicio?m.hora_inicio:null,
+            hora_fin:m.parcial&&m.hora_fin?m.hora_fin:null,
+            horas_standby:0,es_adicional:m.es_adicional||false,
           }))
         ):null,
         incidente.tipo!=='sin_novedad'?supabase.from('incidentes_seg').insert({
@@ -777,30 +1077,77 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
 
       for(const ar of actReps){
         const cfg=configActs.find(c=>c.actividad_id===ar.actividad_id);
-        if(cfg?.tipo==='D'){
-          // Cualitativa — solo observación
+        if(!cfg||cfg.tipo==='D'){
           if(ar.descripcion_cualitativa.trim()){
-            await supabase.from('avance_diario').insert({
+            const{error:cualErr}=await supabase.from('avance_diario').insert({
               reporte_id:rid,fecha,usuario_id:user.id,actividad_id:ar.actividad_id,
-              especialidad_id:espId,area_id:null,cantidad:0,unidad:'cualitativo',
+              especialidad_id:espId,cantidad:0,unidad:'cualitativo',
               acumulado_anterior:0,acumulado_total:0,observacion_es:ar.descripcion_cualitativa,
             });
+            if(cualErr){
+              showToast('err','Error guardando cualitativa: '+cualErr.message);
+              console.error('Error cualitativa:',cualErr);
+            }
           }
           continue;
         }
         if(cfg?.es_medible===false) continue;
+        let avanceId:string|null=null;
         for(const area of ar.areas.filter(a=>a.area_id&&parseFloat(a.cantidad)>0)){
           const{data:prev}=await supabase.from('avance_diario').select('cantidad')
-            .eq('actividad_id',ar.actividad_id).eq('area_id',area.area_id).eq('usuario_id',user.id);
+            .eq('actividad_id',ar.actividad_id).lte('fecha',fecha);
           const acumPrev=(prev||[]).reduce((s:number,r:Record<string,unknown>)=>s+parseFloat(String(r.cantidad||0)),0);
           const cantidad=parseFloat(area.cantidad);
-          await supabase.from('avance_diario').insert({
+          const{data:avRow,error:avErr}=await supabase.from('avance_diario').insert({
             reporte_id:rid,fecha,usuario_id:user.id,actividad_id:ar.actividad_id,
             especialidad_id:espId,area_id:area.area_id,cantidad,
             unidad:cfg?.unidad_es||'',acumulado_anterior:acumPrev,acumulado_total:acumPrev+cantidad,
             observacion_es:ar.observacion_es,
-          });
+          }).select().single();
+          if(avErr){ showToast('err','Error guardando avance: '+avErr.message); console.error('avance_diario insert error:',avErr); }
+          if(avRow&&!avanceId) avanceId=(avRow as Record<string,unknown>).id as string;
         }
+        // Guardar ítems seleccionados si la actividad tiene base de datos
+        if(cfg?.tiene_items_unicos&&ar.items_seleccionados.length>0&&avanceId){
+          const dbEntry=itemDbs[cfg.id];
+          if(dbEntry){
+            const bloqueoTipo=dbEntry.db.bloqueo_tipo;
+            await supabase.from('items_usados').insert(ar.items_seleccionados.map(itemId=>({
+              reporte_id:rid,avance_id:avanceId,item_id:itemId,fecha,
+            })));
+            await supabase.from('items_database').upsert(ar.items_seleccionados.map(itemId=>({
+              id:itemId,bloqueado:true,
+              bloqueado_fecha:bloqueoTipo==='temporal'?fecha:null,
+              bloqueado_en_reporte:rid,
+            })));
+          }
+        }
+      }
+      if(actAdicionales.length>0){
+        const{error:adErr}=await supabase.from('actividades_adicionales_reporte').insert(
+          actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha}))
+        );
+        if(adErr){ showToast('err','Error guardando adicionales: '+adErr.message); console.error('adicionales insert error:',adErr); }
+      }
+      // Suspensiones generales (sin actividad)
+      // ya se guardan arriba en susps
+      // Suspensiones por actividad — guardar en suspensiones_clima con actividad_id
+      if(suspPorActividad.length>0){
+        try{
+          await supabase.from('suspensiones_clima').insert(
+            suspPorActividad.map(s=>({
+              reporte_id:rid,fecha,usuario_id:user.id,
+              actividad_id:s.actividad_id,
+              es_general:false,
+              tipo_susp:s.tipo,
+              otro_desc:s.otro_desc||null,
+              hora_inicio:s.parcial&&s.hora_inicio?s.hora_inicio:null,
+              hora_fin:s.parcial&&s.hora_fin?s.hora_fin:null,
+              horas_perdidas:horasLost([s] as unknown as SuspItem[]),
+              descripcion:`[${s.tipo}${s.tipo==='otro'?': '+s.otro_desc:''}] ${s.observacion||''}`,
+            }))
+          );
+        } catch{}
       }
       try{
         const{data:la}=await supabase.from('profiles').select('id').in('rol',['admin','lider']);
@@ -826,7 +1173,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
     {v:'otro',l:'📝 Otro (especificar)'},
   ];
 
-  if(esDiaAnt&&!solicitudOk&&step===1){
+  if(esDiaAnt&&!solicitudOk&&step===1&&user.rol!=='admin'){
     return(
       <div className="card p-6 text-center space-y-4">
         <div className="text-4xl">🔒</div>
@@ -927,49 +1274,122 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
           </div>
           <div className="space-y-2">
             {asistencia.map((a,i)=>(
-              <div key={a.personal_id} className="flex items-center gap-3 p-2 border border-slate-200 rounded-lg flex-wrap">
-                <input type="checkbox" checked={a.asistio} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,asistio:e.target.checked,motivo_ausencia:''}:x))}/>
-                <div className="flex-1"><div className={`text-sm font-medium ${a.asistio?'':'text-slate-400 line-through'}`}>{a.nombre}</div><div className="text-xs text-slate-400">{a.cargo_es}</div></div>
-                {!a.asistio&&<select className="select text-xs w-auto" value={a.motivo_ausencia} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,motivo_ausencia:e.target.value}:x))}>
-                  <option value="">— Motivo —</option>
-                  <option value="injustificada">Injustificada</option>
-                  <option value="incapacidad">Incapacidad</option>
-                  <option value="permiso">Permiso</option>
-                </select>}
-                {a.asistio&&<span className="text-xs text-emerald-600">{horasReal.toFixed(1)}h</span>}
+              <div key={a.personal_id} className={`p-3 border rounded-lg space-y-2 ${a.es_adicional?'border-amber-200 bg-amber-50':'border-slate-200'}`}>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <input type="checkbox" checked={a.asistio} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,asistio:e.target.checked,motivo_ausencia:'',ausencia_parcial:false}:x))}/>
+                  <div className="flex-1"><div className={`text-sm font-medium ${a.asistio?'':'text-slate-400 line-through'}`}>{a.nombre}{a.es_adicional&&<span className="ml-1 text-xs text-amber-600">★ Adicional</span>}</div><div className="text-xs text-slate-400">{a.cargo_es}</div></div>
+                  {a.asistio&&<span className="text-xs text-emerald-600">{horasReal.toFixed(1)}h</span>}
+                  {a.es_adicional&&<button className="text-rose-400 text-xs" onClick={()=>setAsistencia(arr=>arr.filter((_,j)=>j!==i))}>✕</button>}
+                </div>
+                {!a.asistio&&(
+                  <div className="flex gap-2 flex-wrap ml-6">
+                    <select className="select text-xs w-auto" value={a.motivo_ausencia} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,motivo_ausencia:e.target.value}:x))}>
+                      <option value="">— Motivo —</option>
+                      <option value="injustificada">Injustificada</option>
+                      <option value="incapacidad">Incapacidad</option>
+                      <option value="permiso">Permiso</option>
+                    </select>
+                    <label className="flex items-center gap-1 text-xs cursor-pointer">
+                      <input type="checkbox" checked={a.ausencia_parcial} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,ausencia_parcial:e.target.checked}:x))}/>
+                      Ausencia parcial
+                    </label>
+                    {a.ausencia_parcial&&<>
+                      <input type="time" className="input text-xs w-24" value={a.hora_ausencia_ini} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,hora_ausencia_ini:e.target.value}:x))} placeholder="Desde"/>
+                      <input type="time" className="input text-xs w-24" value={a.hora_ausencia_fin} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,hora_ausencia_fin:e.target.value}:x))} placeholder="Hasta"/>
+                    </>}
+                  </div>
+                )}
+                {a.asistio&&(
+                  <div className="flex gap-2 flex-wrap ml-6">
+                    <label className="flex items-center gap-1 text-xs cursor-pointer">
+                      <input type="checkbox" checked={a.jornada_parcial} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,jornada_parcial:e.target.checked}:x))}/>
+                      Jornada parcial
+                    </label>
+                    {a.jornada_parcial&&<>
+                      <input type="time" className="input text-xs w-24" value={a.hora_jornada_ini} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,hora_jornada_ini:e.target.value}:x))} placeholder="Entrada"/>
+                      <input type="time" className="input text-xs w-24" value={a.hora_jornada_fin} onChange={e=>setAsistencia(arr=>arr.map((x,j)=>j===i?{...x,hora_jornada_fin:e.target.value}:x))} placeholder="Salida"/>
+                    </>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
           {!asistencia.length&&<p className="text-sm text-slate-500">Sin personal planeado para este día.</p>}
+          <div>
+            <label className="label text-xs">+ Agregar personal adicional</label>
+            <select className="select text-sm" value="" onChange={e=>{
+              if(!e.target.value) return;
+              const p=catalogs?.personal.find(x=>x.id===e.target.value);
+              if(!p||asistencia.some(a=>a.personal_id===p.id)) return;
+              setAsistencia(arr=>[...arr,{personal_id:p.id,documento_personal:p.documento,nombre:p.nombre,cargo_es:p.cargo_es,asistio:true,motivo_ausencia:'',ausencia_parcial:false,hora_ausencia_ini:'',hora_ausencia_fin:'',jornada_parcial:false,hora_jornada_ini:'',hora_jornada_fin:'',es_adicional:true}]);
+            }}>
+              <option value="">— Seleccionar personal —</option>
+              {(catalogs?.personal||[]).filter(p=>p.activo!==false&&!asistencia.some(a=>a.personal_id===p.id)).map(p=><option key={p.id} value={p.id}>{p.nombre} — {p.cargo_es}</option>)}
+            </select>
+          </div>
           <div className="flex gap-2"><button className="btn-secondary" onClick={()=>setStep(3)}>← Anterior</button><button className="btn-primary" onClick={()=>setStep(5)}>Siguiente →</button></div>
         </div>
       )}
 
       {step===5&&(
         <div className="card p-4 space-y-3">
-          <h3 className="font-bold text-[#003b7a]">Paso 5 — Maquinaria</h3>
+          <h3 className="font-bold text-[#003b7a]">🚜 Paso 5 — Maquinaria del día</h3>
+          <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded p-2">Maquinaria asignada en la planeación de hoy. Indica cuál se usó realmente.</p>
+          {!maqDia.filter(m=>m.planeada).length&&<p className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">⚠️ No había maquinaria planeada para hoy. Puedes agregar maquinaria adicional abajo.</p>}
           {maqDia.map((m,i)=>(
-            <div key={m.maquinaria_id} className="border border-slate-200 rounded-lg p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-sm">{m.nombre}</span>
-                <span className="text-xs text-slate-500">Op: {Math.max(0,horasReal-m.horas_standby).toFixed(1)}h | SB: {m.horas_standby}h</span>
+            <div key={m.uid} className={`border rounded-xl p-4 ${m.es_adicional?'border-amber-200 bg-amber-50':'border-slate-200'}`}>
+              <div className="flex items-center justify-between mb-3">
+                <div className="font-semibold text-[#003b7a]">{m.nombre}{m.es_adicional&&<span className="ml-2 text-xs text-amber-600 font-normal">★ Adicional</span>}</div>
+                {m.es_adicional&&<button className="text-rose-400 text-sm" onClick={()=>setMaqDia(a=>a.filter((_,j)=>j!==i))}>✕ Quitar</button>}
               </div>
-              <label className="flex items-center gap-2 text-sm mb-2"><input type="checkbox" checked={m.novedad} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,novedad:e.target.checked}:x))}/> ¿Tuvo novedad?</label>
-              {m.novedad&&(
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <div><label className="label">Hora inicio</label><input type="time" className="input" value={m.hora_inicio} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,hora_inicio:e.target.value}:x))}/></div>
-                  <div><label className="label">Hora fin</label><input type="time" className="input" value={m.hora_fin} onChange={e=>{
-                    const[ih,im]=(m.hora_inicio||'0:0').split(':').map(Number);
-                    const[fh,fm]=e.target.value.split(':').map(Number);
-                    const diff=Math.max(0,(fh+fm/60)-(ih+im/60));
-                    setMaqDia(a=>a.map((x,j)=>j===i?{...x,hora_fin:e.target.value,horas_standby:parseFloat(diff.toFixed(2))}:x));
-                  }}/></div>
-                  <div><label className="label">Descripción</label><input className="input" value={m.descripcion} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,descripcion:e.target.value}:x))}/></div>
+              <div className="flex gap-4 mb-2 items-center flex-wrap">
+                <span className="text-sm text-slate-600">¿Se usó?</span>
+                <label className="flex items-center gap-1 cursor-pointer text-sm">
+                  <input type="radio" name={`uso-${m.uid}`} checked={m.uso==='si'} onChange={()=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,uso:'si' as const}:x))}/> Sí
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer text-sm">
+                  <input type="radio" name={`uso-${m.uid}`} checked={m.uso==='no'} onChange={()=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,uso:'no' as const,tiene_novedad:false,parcial:false}:x))}/> No
+                </label>
+              </div>
+              {m.uso==='si'&&(
+                <div className="space-y-2 mt-2">
+                  <div className="flex gap-4 items-center flex-wrap">
+                    <span className="text-sm text-slate-600">Jornada:</span>
+                    <label className="flex items-center gap-1 cursor-pointer text-sm">
+                      <input type="radio" name={`jorn-${m.uid}`} checked={!m.parcial} onChange={()=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,parcial:false,hora_inicio:'',hora_fin:''}:x))}/> Completa
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer text-sm">
+                      <input type="radio" name={`jorn-${m.uid}`} checked={m.parcial} onChange={()=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,parcial:true}:x))}/> Parcial
+                    </label>
+                    {m.parcial&&<>
+                      <input type="time" className="input text-xs w-24" value={m.hora_inicio} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,hora_inicio:e.target.value}:x))} placeholder="Inicio"/>
+                      <input type="time" className="input text-xs w-24" value={m.hora_fin} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,hora_fin:e.target.value}:x))} placeholder="Fin"/>
+                    </>}
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={m.tiene_novedad} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,tiene_novedad:e.target.checked}:x))}/>
+                    ¿Tiene novedad o standby?
+                  </label>
+                  {m.tiene_novedad&&(
+                    <textarea className="input w-full text-sm" rows={2} placeholder="Describe la novedad de esta máquina…"
+                      value={m.novedad} onChange={e=>setMaqDia(a=>a.map((x,j)=>j===i?{...x,novedad:e.target.value}:x))}/>
+                  )}
                 </div>
               )}
             </div>
           ))}
-          {!maqDia.length&&<p className="text-sm text-slate-500">Sin maquinaria activa.</p>}
+          <div>
+            <label className="label">+ Agregar maquinaria no planeada</label>
+            <select className="select" value="" onChange={e=>{
+              if(!e.target.value) return;
+              const maqRow=maquinaria.find(m=>m.id===e.target.value);
+              if(!maqRow||maqDia.some(m=>m.maquinaria_id===maqRow.id)) return;
+              setMaqDia(a=>[...a,{uid:gid(),maquinaria_id:maqRow.id,nombre:maqRow.nombre||`${maqRow.item_id} (${maqRow.tipo})`,uso:'si' as const,planeada:false,es_adicional:true,parcial:false,hora_inicio:'',hora_fin:'',tiene_novedad:false,novedad:''}]);
+            }}>
+              <option value="">— Seleccionar equipo —</option>
+              {maquinaria.filter(m=>m.estado==='activo'&&!maqDia.some(x=>x.maquinaria_id===m.id)).map(m=><option key={m.id} value={m.id}>{m.nombre||`${m.item_id} (${m.tipo})`}</option>)}
+            </select>
+          </div>
           <div className="flex gap-2"><button className="btn-secondary" onClick={()=>setStep(4)}>← Anterior</button><button className="btn-primary" onClick={()=>setStep(6)}>Siguiente →</button></div>
         </div>
       )}
@@ -1001,7 +1421,11 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
 
             if(!cfg) return(
               <div key={ar.uid} className="border border-amber-200 rounded-lg p-3 bg-amber-50">
-                <div className="text-sm text-amber-700">⚠️ {actRow?.actividad_es} — El admin debe configurar esta actividad en <strong>Config. Act.</strong></div>
+                <div className="text-sm text-amber-700 mb-2">⚠️ {actRow?.actividad_es} — Aún no configurada por el admin en <strong>Config. Act.</strong> Mientras tanto, describe aquí lo ejecutado para que no se pierda:</div>
+                <label className="label">Descripción de lo ejecutado hoy</label>
+                <textarea className="textarea" rows={3} value={ar.descripcion_cualitativa}
+                  onChange={e=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,descripcion_cualitativa:e.target.value}:x))}
+                  placeholder="Describe qué se hizo hoy en esta actividad…"/>
               </div>
             );
 
@@ -1041,10 +1465,150 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
                   <textarea className="textarea" rows={1} value={ar.observacion_es}
                     onChange={e=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,observacion_es:e.target.value}:x))}/>
                 </div>
+                {/* Suspensiones de esta actividad */}
+                <div className="border-t border-slate-100 pt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <h5 className="text-xs font-semibold text-slate-600">⚠️ Suspensiones de esta actividad</h5>
+                    <button className="text-xs text-blue-600 hover:underline"
+                      onClick={()=>setSuspPorActividad(p=>[...p,{uid:gid(),actividad_id:ar.actividad_id,tipo:'clima',otro_desc:'',parcial:false,hora_inicio:'',hora_fin:'',observacion:''}])}>
+                      + Agregar suspensión
+                    </button>
+                  </div>
+                  {suspPorActividad.filter(s=>s.actividad_id===ar.actividad_id).map((s)=>{
+                    const si=suspPorActividad.findIndex(x=>x.uid===s.uid);
+                    return(
+                      <div key={s.uid} className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-2 space-y-2">
+                        <div className="flex gap-2 flex-wrap">
+                          <select className="select text-xs flex-1" value={s.tipo}
+                            onChange={e=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,tipo:e.target.value}:x))}>
+                            <option value="clima">🌧 Clima / lluvia</option>
+                            <option value="logistica">📦 Logística</option>
+                            <option value="protesta">🚧 Orden público</option>
+                            <option value="mecanico">🔧 Falla mecánica</option>
+                            <option value="otro">📝 Otro</option>
+                          </select>
+                          {s.tipo==='otro'&&<input className="input text-xs flex-1" placeholder="Especificar…" value={s.otro_desc} onChange={e=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,otro_desc:e.target.value}:x))}/>}
+                        </div>
+                        <div className="flex gap-3 items-center flex-wrap">
+                          <label className="flex items-center gap-1 text-xs cursor-pointer"><input type="radio" checked={!s.parcial} onChange={()=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,parcial:false}:x))}/> Todo el día</label>
+                          <label className="flex items-center gap-1 text-xs cursor-pointer"><input type="radio" checked={s.parcial} onChange={()=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,parcial:true}:x))}/> Parcial</label>
+                          {s.parcial&&<>
+                            <input type="time" className="input text-xs w-24" value={s.hora_inicio} onChange={e=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,hora_inicio:e.target.value}:x))}/>
+                            <input type="time" className="input text-xs w-24" value={s.hora_fin} onChange={e=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,hora_fin:e.target.value}:x))}/>
+                          </>}
+                        </div>
+                        <textarea className="input w-full text-xs" rows={1} placeholder="Observación…" value={s.observacion} onChange={e=>setSuspPorActividad(p=>p.map((x,j)=>j===si?{...x,observacion:e.target.value}:x))}/>
+                        <button className="text-xs text-rose-500 hover:underline" onClick={()=>setSuspPorActividad(p=>p.filter(x=>x.uid!==s.uid))}>Quitar suspensión</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {cfg?.tiene_items_unicos&&(()=>{
+                  const dbEntry=itemDbs[cfg.id];
+                  if(!dbEntry) return <p className="text-xs text-amber-600">Cargando base de datos de ítems…</p>;
+                  const srch=(itemDbSearch[cfg.id]||'').toLowerCase();
+                  const totalCantidad=ar.areas.reduce((s,a)=>s+(parseFloat(a.cantidad)||0),0);
+                  const disponibles=dbEntry.items.filter(it=>{
+                    if(it.bloqueado&&it.bloqueado_fecha!==fecha) return false;
+                    if(it.bloqueado&&!it.bloqueado_fecha) return false;
+                    return true;
+                  });
+                  const filtrados=disponibles.filter(it=>srch?Object.values(it.datos).some(v=>String(v).toLowerCase().includes(srch)):true);
+                  const bloqueados=dbEntry.items.filter(it=>it.bloqueado&&(!it.bloqueado_fecha||it.bloqueado_fecha!==fecha));
+                  const cols=dbEntry.db.columnas.slice(0,3);
+                  return(
+                    <div className="border border-indigo-200 rounded-lg p-3 bg-indigo-50 space-y-2">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <span className="text-xs font-semibold text-indigo-800">🗂️ {dbEntry.db.nombre}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ar.items_seleccionados.length===totalCantidad&&totalCantidad>0?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>
+                          Seleccionados: {ar.items_seleccionados.length} / {totalCantidad}
+                        </span>
+                      </div>
+                      <input className="input text-xs" placeholder="🔍 Buscar ítem…" value={itemDbSearch[cfg.id]||''} onChange={e=>setItemDbSearch(p=>({...p,[cfg.id]:e.target.value}))}/>
+                      <div className="max-h-48 overflow-y-auto space-y-1">
+                        {filtrados.map(it=>{
+                          const sel=ar.items_seleccionados.includes(it.id);
+                          return(
+                            <label key={it.id} className={`flex items-center gap-2 p-2 rounded border cursor-pointer text-xs transition-colors ${sel?'bg-indigo-100 border-indigo-400':'bg-white border-slate-200 hover:border-indigo-300'}`}>
+                              <input type="checkbox" checked={sel} onChange={()=>{
+                                setActReps(arr=>arr.map((x,j)=>j===ai?{...x,items_seleccionados:sel?x.items_seleccionados.filter(id=>id!==it.id):[...x.items_seleccionados,it.id]}:x));
+                              }}/>
+                              <span className="flex-1">{cols.map(c=>it.datos[c.nombre]).filter(Boolean).join(' — ')}</span>
+                              <span className="text-emerald-600">disponible</span>
+                            </label>
+                          );
+                        })}
+                        {bloqueados.slice(0,3).map(it=>(
+                          <div key={it.id} className="flex items-center gap-2 p-2 rounded border border-slate-200 bg-slate-50 text-xs text-slate-400">
+                            <span className="w-4">🔒</span>
+                            <span className="flex-1">{cols.map(c=>it.datos[c.nombre]).filter(Boolean).join(' — ')}</span>
+                            <span>ya ejecutado</span>
+                          </div>
+                        ))}
+                        {!filtrados.length&&!bloqueados.length&&<p className="text-xs text-slate-400 text-center py-2">Sin ítems disponibles.</p>}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
           {!actReps.length&&<p className="text-sm text-slate-500">Selecciona una especialidad en el Paso 1.</p>}
+
+          {/* Actividades adicionales no planeadas */}
+          <div className="mt-4 border-t border-slate-200 pt-4">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-bold text-[#003b7a] text-sm">➕ Actividades adicionales (no planeadas)</h4>
+              <button className="btn-secondary text-sm" onClick={()=>setMostrarFormAdicional(true)}>+ Agregar actividad adicional</button>
+            </div>
+            {mostrarFormAdicional&&(
+              <div className="border border-blue-200 bg-blue-50 rounded-xl p-4 mb-3 space-y-3">
+                <div>
+                  <label className="label">Actividad realizada</label>
+                  <input list="catalogo-adicionales" className="input w-full" placeholder="Escribe o selecciona una actividad…"
+                    value={nuevaAdicionalNombre} onChange={e=>setNuevaAdicionalNombre(e.target.value)}/>
+                  <datalist id="catalogo-adicionales">
+                    {catAdicionales.map(c=><option key={c.id} value={c.nombre}/>)}
+                  </datalist>
+                  {catAdicionales.some(c=>c.nombre.toLowerCase().includes(nuevaAdicionalNombre.toLowerCase())&&nuevaAdicionalNombre.length>2)&&(
+                    <div className="text-xs text-blue-600 mt-1">💡 Selecciona del listado para mantener consistencia de nombres</div>
+                  )}
+                </div>
+                <div>
+                  <label className="label">Descripción de lo ejecutado</label>
+                  <textarea className="textarea w-full" rows={2} placeholder="Describe qué se hizo exactamente…"
+                    value={nuevaAdicionalDesc} onChange={e=>setNuevaAdicionalDesc(e.target.value)}/>
+                </div>
+                <div className="flex gap-2">
+                  <button className="btn-primary text-sm" disabled={!nuevaAdicionalNombre.trim()||!nuevaAdicionalDesc.trim()} onClick={async()=>{
+                    const nombre=nuevaAdicionalNombre.trim();
+                    const existente=catAdicionales.find(c=>c.nombre.toLowerCase()===nombre.toLowerCase());
+                    let catalogoId:string|null=existente?.id||null;
+                    if(existente){
+                      await supabase.from('actividades_adicionales_catalogo').update({veces_usada:existente.veces_usada+1}).eq('id',existente.id);
+                    } else {
+                      const{data:nueva}=await supabase.from('actividades_adicionales_catalogo').insert({nombre,veces_usada:1,activo:true}).select().single();
+                      if(nueva){ catalogoId=(nueva as Record<string,unknown>).id as string; setCatAdicionales(p=>[...p,nueva as ActAdicCat]); }
+                    }
+                    setActAdicionales(p=>[...p,{uid:gid(),nombre,descripcion:nuevaAdicionalDesc.trim(),catalogoId}]);
+                    setNuevaAdicionalNombre('');setNuevaAdicionalDesc('');setMostrarFormAdicional(false);
+                  }}>Guardar actividad adicional</button>
+                  <button className="btn-secondary text-sm" onClick={()=>{setMostrarFormAdicional(false);setNuevaAdicionalNombre('');setNuevaAdicionalDesc('');}}>Cancelar</button>
+                </div>
+              </div>
+            )}
+            {actAdicionales.map((ad,ai)=>(
+              <div key={ad.uid} className="flex items-start justify-between bg-white border border-slate-200 rounded-lg p-3 mb-2">
+                <div>
+                  <div className="font-medium text-sm text-[#003b7a]">{ad.nombre}</div>
+                  <div className="text-xs text-slate-500 mt-0.5">{ad.descripcion}</div>
+                </div>
+                <button className="text-rose-500 text-xs hover:underline ml-3 shrink-0" onClick={()=>setActAdicionales(a=>a.filter((_,j)=>j!==ai))}>Quitar</button>
+              </div>
+            ))}
+            {!actAdicionales.length&&!mostrarFormAdicional&&<div className="text-xs text-slate-400 italic">Sin actividades adicionales este día.</div>}
+          </div>
+
           <div className="flex gap-2"><button className="btn-secondary" onClick={()=>setStep(5)}>← Anterior</button><button className="btn-primary" onClick={()=>setStep(7)}>Siguiente →</button></div>
         </div>
       )}
@@ -1106,11 +1670,15 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
   const[espId,setEspId]=useState('');
   const[reportes,setReportes]=useState<Record<string,unknown>[]>([]);
   const[avances,setAvances]=useState<Record<string,unknown>[]>([]);
+  const[cualAprob,setCualAprob]=useState<Record<string,unknown>[]>([]);
+  const[adicAprob,setAdicAprob]=useState<Record<string,unknown>[]>([]);
   const[aprobadas,setAprobadas]=useState<Set<string>>(new Set());
   const[rechazadas,setRechazadas]=useState<Set<string>>(new Set());
   const[motivos,setMotivos]=useState<Record<string,string>>({});
   const[saving,setSaving]=useState(false);
   const[loading,setLoading]=useState(false);
+  const[pendientes,setPendientes]=useState<Record<string,unknown>[]>([]);
+  const[loadingPend,setLoadingPend]=useState(false);
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
 
   async function cargar(){
@@ -1120,10 +1688,33 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
       const{data:reps}=await supabase.from('reportes_avance').select('*').eq('fecha',fecha).eq('especialidad_id',espId).eq('estado','borrador');
       const repIds=(reps||[]).map((r:Record<string,unknown>)=>r.id as string);
       const avs=repIds.length?(await supabase.from('avance_diario').select('*').in('reporte_id',repIds)).data||[]:[];
-      setReportes(reps||[]); setAvances(avs as Record<string,unknown>[]);
+      const adics=repIds.length?(await supabase.from('actividades_adicionales_reporte').select('*').in('reporte_id',repIds)).data||[]:[];
+      const avD=avs as Record<string,unknown>[];
+      setReportes(reps||[]);
+      setAvances(avD.filter(a=>a.unidad!=='cualitativo'));
+      setCualAprob(avD.filter(a=>a.unidad==='cualitativo'));
+      setAdicAprob(adics as Record<string,unknown>[]);
       setAprobadas(new Set()); setRechazadas(new Set()); setMotivos({});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
+  }
+
+  async function cargarPendientes(){
+    setLoadingPend(true);
+    try{
+      const{data:pends}=await supabase.from('reportes_avance').select('id,fecha,especialidad_id,estado,usuario_nombre,created_at,especialidades_actividades(especialidad_es)').in('estado',['borrador','enviado']).order('fecha',{ascending:false});
+      setPendientes((pends||[]) as Record<string,unknown>[]);
+    } catch{ setPendientes([]); }
+    finally{ setLoadingPend(false); }
+  }
+  useEffect(()=>{cargarPendientes();},[]);
+
+  async function aprobarMultiples(ids:string[]){
+    if(!window.confirm(`¿Aprobar ${ids.length} reportes enviados?`)) return;
+    await supabase.from('reportes_avance').update({estado:'aprobado',aprobado_por:user.id,aprobado_en:new Date().toISOString()}).in('id',ids);
+    await supabase.from('aprobacion_informes').insert(ids.map(id=>({reporte_id:id,aprobado_por:user.id,estado:'aprobado',version:1})));
+    showToast('ok',`${ids.length} reportes aprobados`);
+    cargarPendientes();
   }
 
   const actividadesConReps=useMemo(()=>{
@@ -1187,6 +1778,43 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
 
   return(
     <div className="space-y-4">
+      {/* REPORTES PENDIENTES */}
+      <div className="card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold text-[#003b7a]">🕐 Reportes pendientes de aprobación{pendientes.length>0&&<span className="ml-2 bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">{pendientes.length}</span>}</h3>
+          <button className="btn-secondary text-xs" onClick={cargarPendientes}>🔄 Actualizar</button>
+        </div>
+        {loadingPend&&<div className="text-sm text-slate-500">Cargando...</div>}
+        {!loadingPend&&pendientes.length===0&&<div className="text-sm text-slate-500 italic text-center py-4">✅ No hay reportes pendientes de aprobación</div>}
+        {!loadingPend&&pendientes.length>0&&(
+          <div className="space-y-2">
+            {pendientes.map(rep=>{
+              const esp=(rep.especialidades_actividades as Record<string,string>)?.especialidad_es||'—';
+              const estado=rep.estado as string;
+              return(
+                <div key={rep.id as string} className="flex items-center justify-between border border-slate-200 rounded-xl p-3 hover:border-[#003b7a] hover:bg-blue-50 transition-all cursor-pointer" onClick={()=>{setFecha(rep.fecha as string);setEspId(rep.especialidad_id as string);}}>
+                  <div>
+                    <div className="font-bold text-sm text-[#003b7a]">{esp}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">📅 {rep.fecha as string} · 👤 {rep.usuario_nombre as string}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${estado==='enviado'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700'}`}>{estado==='enviado'?'📤 Enviado':'📝 Borrador'}</span>
+                    <span className="text-xs text-blue-600 font-medium">Ver →</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {pendientes.filter(p=>(p as Record<string,unknown>).estado==='enviado').length>1&&(
+          <div className="mt-3 pt-3 border-t border-slate-200">
+            <button className="btn-primary text-sm w-full" onClick={()=>{const ids=pendientes.filter(p=>(p as Record<string,unknown>).estado==='enviado').map(p=>(p as Record<string,unknown>).id as string);aprobarMultiples(ids);}}>
+              ✅ Aprobar todos los enviados ({pendientes.filter(p=>(p as Record<string,unknown>).estado==='enviado').length})
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className="card p-4 flex gap-3 items-end flex-wrap">
         <div className="flex-1 min-w-[140px]"><label className="label">Fecha</label><input type="date" className="input" value={fecha} onChange={e=>setFecha(e.target.value)}/></div>
         <div className="flex-1 min-w-[180px]"><label className="label">Especialidad</label><select className="select" value={espId} onChange={e=>setEspId(e.target.value)}><option value="">— Seleccionar —</option>{espList.map(e=><option key={e.id} value={e.id}>{e.especialidad_es}</option>)}</select></div>
@@ -1240,7 +1868,30 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
                             <label className="flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" checked={isRe} onChange={()=>toggleRe(c.reporte_id)} className="w-4 h-4 accent-rose-600"/><span className="text-xs font-semibold text-rose-700">✗ Rechazar</span></label>
                           </div>
                         </div>
-                        {isRe&&<input className="input text-xs" placeholder="Motivo del rechazo (obligatorio)…" value={motivos[c.reporte_id]||''} onChange={e=>setMotivos(m=>({...m,[c.reporte_id]:e.target.value}))}/>}
+                        {cualAprob.filter(a=>a.reporte_id===c.reporte_id).length>0&&(
+                          <div className="mt-2 space-y-1">
+                            <div className="text-xs font-semibold text-purple-700 mb-1">📋 Actividades cualitativas</div>
+                            {cualAprob.filter(a=>a.reporte_id===c.reporte_id).map((a,i)=>{
+                              const aRq=catalogs?.especialidades_actividades.find(e=>e.id===(a.actividad_id as string));
+                              return(<div key={i} className="bg-purple-50 border border-purple-200 rounded p-2">
+                                <div className="font-semibold text-xs text-purple-800">{aRq?.actividad_es||'Actividad'}</div>
+                                <div className="text-xs text-slate-600 mt-0.5">{a.observacion_es as string}</div>
+                              </div>);
+                            })}
+                          </div>
+                        )}
+                        {adicAprob.filter(a=>a.reporte_id===c.reporte_id).length>0&&(
+                          <div className="mt-2 space-y-1">
+                            <div className="text-xs font-semibold text-indigo-700 mb-1">➕ Actividades adicionales</div>
+                            {adicAprob.filter(a=>a.reporte_id===c.reporte_id).map((a,i)=>(
+                              <div key={i} className="bg-indigo-50 border border-indigo-200 rounded p-2">
+                                <div className="font-semibold text-xs text-indigo-800">{a.nombre as string}</div>
+                                <div className="text-xs text-slate-600 mt-0.5">{a.descripcion_ejecutado as string}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {isRe&&<input className="input text-xs mt-2" placeholder="Motivo del rechazo (obligatorio)…" value={motivos[c.reporte_id]||''} onChange={e=>setMotivos(m=>({...m,[c.reporte_id]:e.target.value}))}/>}
                       </div>
                     );
                   })}
@@ -1321,7 +1972,7 @@ function SolicitudesModule({user,catalogs,showToast}:{user:Profile;catalogs:Cata
               <div>
                 <div className="font-medium text-sm">{s.tecnico_nombre as string} — <strong>{s.fecha_reporte as string}</strong></div>
                 <div className="text-xs text-slate-500 mt-0.5">Motivo: {s.motivo as string}</div>
-                {s.comentario&&<div className="text-xs text-slate-500">Resp: {s.comentario as string}</div>}
+                {(s.comentario as string)&&<div className="text-xs text-slate-500">Resp: {s.comentario as string}</div>}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className={`badge ${s.estado==='aprobado'?'bg-emerald-100 text-emerald-800':s.estado==='rechazado'?'bg-rose-100 text-rose-800':'badge-borrador'}`}>{s.estado as string}</span>
@@ -1340,39 +1991,60 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
   const[fechaIni,setFechaIni]=useState(new Date(Date.now()-7*86400000).toISOString().split('T')[0]);
   const[fechaFin,setFechaFin]=useState(today());
   const[espId,setEspId]=useState('');
+  const[actIds,setActIds]=useState<string[]>([]);
+  const[incluirPersonal,setIncluirPersonal]=useState(false);
+  const[incluirMaquinaria,setIncluirMaquinaria]=useState(false);
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
+  const actList=useMemo(()=>{
+    if(!catalogs) return [];
+    if(!espId) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
+    const nom=(espList.find(e=>e.id===espId)?.especialidad_es||'').toLowerCase();
+    return catalogs.especialidades_actividades.filter(a=>a.activo!==false&&(a.especialidad_es||'').toLowerCase()===nom);
+  },[catalogs,espId,espList]);
 
   async function load(){
     setLoading(true);
     try{
       let qR=supabase.from('reportes_avance').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin);
       if(espId) qR=qR.eq('especialidad_id',espId);
-      const[reps,asist,avances,incid,maqD]=await Promise.all([
+      const[reps,incid,maqD]=await Promise.all([
         qR,
-        supabase.from('asistencia_real').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin),
-        supabase.from('avance_diario').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin),
         supabase.from('incidentes_seg').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin).neq('tipo','sin_novedad'),
-        supabase.from('maquinaria').select('*'),
+        incluirMaquinaria?supabase.from('maquinaria').select('*'):Promise.resolve({data:[]}),
+      ]);
+      const repIds=(reps.data||[]).map((r:Record<string,unknown>)=>r.id as string);
+      // Cargar avances, asistencia, cualitativas y adicionales filtrados por reportes
+      const[avances,asist,adics,susps]=await Promise.all([
+        repIds.length?supabase.from('avance_diario').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length&&incluirPersonal?supabase.from('asistencia_real').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length?supabase.from('actividades_adicionales_reporte').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length?supabase.from('suspensiones_clima').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
       ]);
       const aD=(asist.data||[]) as Record<string,unknown>[];
-      const avD=(avances.data||[]) as Record<string,unknown>[];
+      let avD=(avances.data||[]) as Record<string,unknown>[];
+      if(actIds.length) avD=avD.filter(a=>actIds.includes(a.actividad_id as string));
+      const adicD=(adics.data||[]) as Record<string,unknown>[];
+      const suspD=(susps.data||[]) as Record<string,unknown>[];
       const horasH=aD.filter(a=>a.asistio).reduce((s,a)=>s+parseFloat(String(a.horas_trabajadas||0)),0);
+      const horasP=suspD.reduce((s,a)=>s+parseFloat(String(a.horas_perdidas||0)),0);
       const pl=aD.length,re=aD.filter(a=>a.asistio).length;
 
-      // Avance por actividad
+      // Avance por actividad (solo cuantitativas)
       const avPorAct:Record<string,number>={};
-      avD.forEach(av=>{
+      avD.filter(av=>av.unidad!=='cualitativo').forEach(av=>{
         const id=av.actividad_id as string;
         avPorAct[id]=(avPorAct[id]||0)+parseFloat(String(av.cantidad||0));
       });
+      // Cualitativas
+      const cualD=avD.filter(av=>av.unidad==='cualitativo') as Record<string,unknown>[];
 
       // Horas maquinaria por novedades
-      const{data:novedades}=await supabase.from('novedades_maquinaria').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin);
+      const{data:novedades}=incluirMaquinaria?await supabase.from('novedades_maquinaria').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin):{data:[]};
       const horasSB=(novedades||[]).reduce((s:number,n:Record<string,unknown>)=>s+parseFloat(String(n.horas_standby||0)),0);
 
-      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
+      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
   }
@@ -1396,19 +2068,26 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
 
   return(
     <div className="space-y-4">
-      <div className="card p-4 flex gap-3 items-end flex-wrap no-print">
-        <div className="flex-1 min-w-[130px]"><label className="label">Desde</label><input type="date" className="input" value={fechaIni} onChange={e=>setFechaIni(e.target.value)}/></div>
-        <div className="flex-1 min-w-[130px]"><label className="label">Hasta</label><input type="date" className="input" value={fechaFin} onChange={e=>setFechaFin(e.target.value)}/></div>
-        <div className="flex-1 min-w-[160px]"><label className="label">Especialidad</label><select className="select" value={espId} onChange={e=>setEspId(e.target.value)}><option value="">Todas</option>{espList.map(e=><option key={e.id} value={e.id}>{e.especialidad_es}</option>)}</select></div>
-        <button className="btn-primary" onClick={load} disabled={loading}>{loading?'Cargando…':'Actualizar'}</button>
+      <div className="card p-4 space-y-3 no-print">
+        <div className="flex gap-3 items-end flex-wrap">
+          <div className="flex-1 min-w-[130px]"><label className="label">Desde</label><input type="date" className="input" value={fechaIni} onChange={e=>setFechaIni(e.target.value)}/></div>
+          <div className="flex-1 min-w-[130px]"><label className="label">Hasta</label><input type="date" className="input" value={fechaFin} onChange={e=>setFechaFin(e.target.value)}/></div>
+          <div className="flex-1 min-w-[160px]"><label className="label">Especialidad</label><select className="select" value={espId} onChange={e=>{setEspId(e.target.value);setActIds([]);}}><option value="">Todas</option>{espList.map(e=><option key={e.id} value={e.id}>{e.especialidad_es}</option>)}</select></div>
+          <button className="btn-primary" onClick={load} disabled={loading}>{loading?'Cargando…':'Actualizar'}</button>
+        </div>
+        <div><div className="flex items-center justify-between mb-1"><label className="label">Actividades</label><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setActIds([])}>Ninguna (todas automático)</button></div><div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">{actList.map(a=><button key={a.id} onClick={()=>toggle(actIds,setActIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${actIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.actividad_es}</button>)}</div></div>
+        <div className="flex items-center gap-4 flex-wrap">
+          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirPersonal} onChange={e=>setIncluirPersonal(e.target.checked)}/> Incluir personal/asistencia</label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirMaquinaria} onChange={e=>setIncluirMaquinaria(e.target.checked)}/> Incluir maquinaria</label>
+        </div>
       </div>
 
       {data&&(
         <>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <MC label="Eficiencia personal" value={`${data.eficiencia_personal as number}%`} sub="asistencia" color={(data.eficiencia_personal as number)>=90?'text-emerald-600':(data.eficiencia_personal as number)>=70?'text-amber-500':'text-rose-600'}/>
-            <MC label="Horas-hombre" value={`${data.horas_hombre as number}h`} sub="productivas"/>
-            <MC label="Horas stand-by" value={`${data.horas_standby_total as string}h`} sub="maquinaria"/>
+            <MC label="Eficiencia personal" value={incluirPersonal?`${data.eficiencia_personal as number}%`:'—'} sub="asistencia" color={!incluirPersonal?'text-slate-400':(data.eficiencia_personal as number)>=90?'text-emerald-600':(data.eficiencia_personal as number)>=70?'text-amber-500':'text-rose-600'}/>
+            <MC label="Horas-hombre" value={incluirPersonal?`${data.horas_hombre as number}h`:'—'} sub="productivas"/>
+            <MC label="Horas stand-by" value={incluirMaquinaria?`${data.horas_standby_total as string}h`:'—'} sub="maquinaria"/>
             <MC label="Incidentes" value={(data.incidentes as unknown[]).length} sub="seguridad" color={(data.incidentes as unknown[]).length>0?'text-rose-600':'text-emerald-600'}/>
           </div>
 
@@ -1463,6 +2142,90 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
             </div>
           )}
 
+          {/* ACTIVIDADES CUALITATIVAS EN DASHBOARD */}
+          {data&&((data.cualitativas||[]) as unknown[]).length>0&&(
+            <div className="card p-4">
+              <h3 className="font-bold text-[#003b7a] mb-3">📋 Actividades cualitativas reportadas</h3>
+              <div className="space-y-2">
+                {((data.cualitativas||[]) as Record<string,unknown>[]).map((a,i)=>{
+                  const aR=catalogs?.especialidades_actividades.find(e=>e.id===(a.actividad_id as string));
+                  return(
+                    <div key={i} className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                      <div className="font-semibold text-sm text-purple-800">{aR?.actividad_es||'Actividad'}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">{a.fecha as string}</div>
+                      <div className="text-xs text-slate-600 mt-1 italic">"{a.observacion_es as string||'Sin descripción'}"</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ACTIVIDADES ADICIONALES EN DASHBOARD */}
+          {data&&((data.adicionales||[]) as unknown[]).length>0&&(
+            <div className="card p-4">
+              <h3 className="font-bold text-[#003b7a] mb-3">➕ Actividades adicionales</h3>
+              <div className="space-y-2">
+                {((data.adicionales||[]) as Record<string,unknown>[]).map((a,i)=>(
+                  <div key={i} className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                    <div className="font-semibold text-sm text-indigo-800">{a.nombre as string}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{a.fecha as string}</div>
+                    <div className="text-xs text-slate-600 mt-1 italic">"{a.descripcion_ejecutado as string||''}"</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* PERSONAL POR ESPECIALIDAD EN DASHBOARD */}
+          {data&&((data.asistencia||[]) as unknown[]).length>0&&(()=>{
+            const asistD=(data.asistencia as Record<string,unknown>[]);
+            const repsD=(data.reportes as Record<string,unknown>[]);
+            const repEspMap:Record<string,string>={};
+            repsD.forEach(r=>{repEspMap[r.id as string]=r.especialidad_id as string;});
+            const porEsp:Record<string,Record<string,{nombre:string;cargo:string;totalHoras:number;asistio:boolean;motivo:string}>>={};
+            asistD.forEach(a=>{
+              const espId=repEspMap[a.reporte_id as string]||'';
+              const espNom=catalogs?.especialidades_actividades.find(e=>e.id===espId)?.especialidad_es||'Sin especialidad';
+              if(!porEsp[espNom]) porEsp[espNom]={};
+              const doc=a.documento_personal as string;
+              const persInfo=catalogs?.personal.find(p=>p.documento===doc);
+              if(!porEsp[espNom][doc]) porEsp[espNom][doc]={nombre:persInfo?.nombre||doc,cargo:persInfo?.cargo_es||'—',totalHoras:0,asistio:false,motivo:''};
+              porEsp[espNom][doc].totalHoras+=parseFloat(String(a.horas_trabajadas||0));
+              if(a.asistio) porEsp[espNom][doc].asistio=true;
+              if(a.motivo_ausencia) porEsp[espNom][doc].motivo=a.motivo_ausencia as string;
+            });
+            delete porEsp['Sin especialidad'];
+            if(!Object.keys(porEsp).length) return null;
+            return(
+              <div className="card p-4">
+                <h3 className="font-bold text-[#003b7a] mb-3">👥 Personal por especialidad</h3>
+                <div className="space-y-4">
+                  {Object.entries(porEsp).map(([espNom,docs])=>{
+                    const lista=Object.values(docs);
+                    return(
+                      <div key={espNom}>
+                        <div className="text-xs font-bold text-[#003b7a] uppercase tracking-wide mb-2 bg-blue-50 px-3 py-1.5 rounded-lg">🌿 {espNom}</div>
+                        <table className="w-full text-xs border-collapse">
+                          <thead><tr className="bg-slate-50"><th className="text-left px-3 py-2 font-medium text-slate-500">Nombre</th><th className="text-left px-3 py-2 font-medium text-slate-500">Cargo</th><th className="text-center px-3 py-2 font-medium text-slate-500">Estado</th><th className="text-center px-3 py-2 font-medium text-slate-500">Horas</th><th className="text-left px-3 py-2 font-medium text-slate-500">Motivo</th></tr></thead>
+                          <tbody>{lista.map((p,i)=>(
+                            <tr key={i} className="border-t border-slate-100">
+                              <td className="px-3 py-1.5 font-medium">{p.nombre}</td>
+                              <td className="px-3 py-1.5 text-slate-500">{p.cargo}</td>
+                              <td className="px-3 py-1.5 text-center">{p.asistio?<span className="text-emerald-600 font-bold">✅</span>:<span className="text-rose-600 font-bold">❌</span>}</td>
+                              <td className="px-3 py-1.5 text-center"><span className="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded">{p.totalHoras}h</span></td>
+                              <td className="px-3 py-1.5 text-slate-400 italic">{p.motivo||'—'}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* MAQUINARIA */}
           {(data.maquinaria as unknown[]).length>0&&(
             <div className="card p-4">
@@ -1507,18 +2270,30 @@ function MC({label,value,sub,color='text-[#003b7a]'}:{label:string;value:unknown
 }
 
 // ── INFORMES ──────────────────────────────────────────────────────
-function InformesModule({user,catalogs,configActs,showToast}:{
-  user:Profile; catalogs:Catalogs|null; configActs:ConfigAct[];
+function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
+  user:Profile; catalogs:Catalogs|null; configActs:ConfigAct[]; maquinaria:Maq[];
   showToast:(k:'ok'|'err'|'info',m:string)=>void;
 }){
-  const[fechaIni,setFechaIni]=useState(today());
+  const[fechaIni,setFechaIni]=useState(new Date(Date.now()-7*86400000).toISOString().split('T')[0]);
   const[fechaFin,setFechaFin]=useState(today());
   const[espIds,setEspIds]=useState<string[]>([]);
   const[areaIds,setAreaIds]=useState<string[]>([]);
+  const[actIds,setActIds]=useState<string[]>([]);
+  const[incluirPersonal,setIncluirPersonal]=useState(false);
+  const[incluirMaquinaria,setIncluirMaquinaria]=useState(false);
+  const[modo,setModo]=useState<'resumen'|'detallado'>('resumen');
   const[soloAp,setSoloAp]=useState(false);
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
+  const actList=useMemo(()=>{
+    if(!catalogs) return [];
+    if(!espIds.length) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
+    const nombres=new Set(espIds.map(id=>espList.find(e=>e.id===id)?.especialidad_es?.toLowerCase()).filter(Boolean));
+    return catalogs.especialidades_actividades.filter(a=>a.activo!==false&&nombres.has((a.especialidad_es||'').toLowerCase()));
+  },[catalogs,espIds,espList]);
+
+  useEffect(()=>{ if(catalogs) fetchData(); },[catalogs]);
 
   async function fetchData(){
     setLoading(true);
@@ -1526,103 +2301,177 @@ function InformesModule({user,catalogs,configActs,showToast}:{
       let qR=supabase.from('reportes_avance').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin);
       if(espIds.length) qR=qR.in('especialidad_id',espIds);
       if(soloAp) qR=qR.eq('estado','aprobado');
-      if(user.rol==='tecnico') qR=qR.eq('usuario_id',user.id);
       if(user.rol==='cliente') qR=qR.eq('estado','aprobado');
       const{data:reps}=await qR;
       const repIds=(reps||[]).map((r:Record<string,unknown>)=>r.id as string);
-      const[av,as2,sc]=await Promise.all([
+      const[av,as2,sc,maqNov,adics]=await Promise.all([
         repIds.length?supabase.from('avance_diario').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
-        repIds.length?supabase.from('asistencia_real').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length&&incluirPersonal?supabase.from('asistencia_real').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
         repIds.length?supabase.from('suspensiones_clima').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length&&incluirMaquinaria?supabase.from('novedades_maquinaria').select('*,maquinaria(item_id,tipo,nombre)').in('reporte_id',repIds):Promise.resolve({data:[]}),
+        repIds.length?supabase.from('actividades_adicionales_reporte').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
       ]);
       let avD=(av.data||[]) as Record<string,unknown>[];
       if(areaIds.length) avD=avD.filter(a=>areaIds.includes(a.area_id as string));
+      if(actIds.length) avD=avD.filter(a=>actIds.includes(a.actividad_id as string));
       const aD=(as2.data||[]) as Record<string,unknown>[];
       const horasH=aD.filter(a=>a.asistio).reduce((s,a)=>s+parseFloat(String(a.horas_trabajadas||0)),0);
       const horasC=((sc.data||[]) as Record<string,unknown>[]).reduce((s,a)=>s+parseFloat(String(a.horas_perdidas||0)),0);
 
       // Calcular acumulado real incluyendo acumulado previo de config
-      const avConMeta=avD.map(av=>{
+      const avConMeta:Record<string,unknown>[]=avD.map(av=>{
         const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
         const acumPrevio=cfg?.acumulado_previo||0;
         return{...av,acumulado_total_real:(av.acumulado_total as number)+acumPrevio};
       });
+      const avancesNorm=avConMeta.filter(a=>a.unidad!=='cualitativo');
+      const cualitativas=avConMeta.filter(a=>a.unidad==='cualitativo');
+      const adicionales=(adics.data||[]) as Record<string,unknown>[];
+      const suspensiones=(sc.data||[]) as Record<string,unknown>[];
+      const maquinaria=(maqNov.data||[]) as Record<string,unknown>[];
 
-      setData({reportes:reps||[],avances:avConMeta,asistencia:aD,totales:{horas_hombre:Math.round(horasH),horas_perdidas_clima:Math.round(horasC),dias:repIds.length}});
+      setData({reportes:reps||[],avances:avancesNorm,cualitativas,adicionales,asistencia:aD,suspensiones,maquinaria,totales:{horas_hombre:Math.round(horasH),horas_perdidas_clima:Math.round(horasC),dias:repIds.length}});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
   }
 
   function imprimirPlan(){
-    if(!data) return;
+    try{
+    if(!data){showToast('err','No hay datos. Consulta primero.');return;}
+    if(!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length){showToast('info','No hay actividades en el período seleccionado');return;}
     const avances=data.avances as Record<string,unknown>[];
-    const reportes=data.reportes as Record<string,unknown>[];
-    // Agrupar avances por actividad
-    const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;pct:number|null;acum:number;filas:{fecha:string;area:string;hoy:number;acumulado:number}[]}> = {};
-    avances.forEach(av=>{
-      const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
-      const arR=catalogs?.areas.find(a=>a.id===(av.area_id as string));
-      const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
-      const id=av.actividad_id as string;
-      if(!porAct[id]) porAct[id]={nombre:aR?.actividad_es||id,unidad:cfg?.unidad_es||'',meta:cfg?.meta_total||null,pct:null,acum:0,filas:[]};
-      const cantidad=parseFloat(String(av.cantidad||0));
-      const acumTotal=av.acumulado_total_real as number;
-      porAct[id].acum=Math.max(porAct[id].acum,acumTotal);
-      porAct[id].filas.push({fecha:av.fecha as string,area:arR?.area_es||'',hoy:cantidad,acumulado:acumTotal});
-    });
-    Object.values(porAct).forEach(a=>{if(a.meta) a.pct=Math.min(100,Math.round(a.acum/a.meta*100));});
-    const isC=user.rol==='cliente';
-    const resumen=(data.totales as Record<string,unknown>);
-    const actRows=Object.values(porAct).map(a=>{
-      const barW=a.pct??0;
-      const barColor=barW>=90?'#10b981':barW>=50?'#3b82f6':'#f59e0b';
-      const filaRows=a.filas.map(f=>`<tr><td>${f.fecha}</td><td>${f.area}</td><td style="text-align:right;font-weight:600">${f.hoy}</td><td style="text-align:right;color:#003b7a;font-weight:700">${f.acumulado}</td></tr>`).join('');
-      return `<div class="act-block">
-        <div class="act-titulo">${a.nombre} <span class="act-unit">${a.unidad}</span></div>
-        <div class="act-nums">
-          <div class="act-num-box"><div class="act-num-val" style="color:#003b7a">${a.acum}</div><div class="act-num-lbl">Acumulado</div></div>
-          ${a.meta?`<div class="act-num-box"><div class="act-num-val" style="color:#64748b">${a.meta}</div><div class="act-num-lbl">Meta</div></div><div class="act-num-box"><div class="act-num-val" style="color:${barColor}">${a.pct}%</div><div class="act-num-lbl">Avance</div></div>`:''}
-        </div>
-        ${a.meta?`<div class="bar-wrap"><div class="bar-fill" style="width:${Math.max(2,barW)}%;background:${barColor}"></div></div>
-        <div class="bar-labels"><span>0</span><span>${a.meta} ${a.unidad}</span></div>`:''}
-        <table class="det-table"><thead><tr><th>Fecha</th><th>Área</th><th style="text-align:right">Hoy</th><th style="text-align:right">Acumulado</th></tr></thead><tbody>${filaRows}</tbody></table>
-      </div>`;
-    }).join('');
+    const cual=((data.cualitativas||[]) as Record<string,unknown>[]);
+    const adic=((data.adicionales||[]) as Record<string,unknown>[]);
+    const susps=((data.suspensiones||[]) as Record<string,unknown>[]);
+    const maqNovs=((data.maquinaria||[]) as Record<string,unknown>[]);
+    const reps=data.reportes as Record<string,unknown>[];
+    const resumen=data.totales as Record<string,unknown>;
+    const repEspMap:Record<string,string>={};
+    reps.forEach(r=>{repEspMap[r.id as string]=r.especialidad_id as string;});
+    const getEspNom=(eId:string)=>catalogs?.especialidades_actividades.find(e=>e.id===eId)?.especialidad_es||eId;
+    const isCliente=user.rol==='cliente';
+
+    // Agrupar todo por especialidad
+    const porEsp:Record<string,{
+      avances:Record<string,unknown>[];cual:Record<string,unknown>[];adic:Record<string,unknown>[];
+      personal:Record<string,unknown>[];susps:Record<string,unknown>[];maq:Record<string,unknown>[];
+    }>={};
+    const addE=(espId:string,tipo:'avances'|'cual'|'adic'|'personal'|'susps'|'maq',item:Record<string,unknown>)=>{
+      if(!espId) return;
+      const n=getEspNom(espId);
+      if(!porEsp[n]) porEsp[n]={avances:[],cual:[],adic:[],personal:[],susps:[],maq:[]};
+      porEsp[n][tipo].push(item);
+    };
+    avances.forEach(av=>addE(av.especialidad_id as string,'avances',av));
+    cual.forEach(av=>addE(av.especialidad_id as string,'cual',av));
+    adic.forEach(ad=>addE(repEspMap[ad.reporte_id as string]||'','adic',ad));
+    ((data.asistencia||[]) as Record<string,unknown>[]).forEach(a=>addE(repEspMap[a.reporte_id as string]||'','personal',a));
+    susps.forEach(s=>addE(repEspMap[s.reporte_id as string]||'','susps',s));
+    maqNovs.forEach(m=>addE(repEspMap[m.reporte_id as string]||'','maq',m));
+    delete porEsp[''];
+
     const css=`body{font-family:Arial,sans-serif;font-size:11px;color:#1e293b;margin:20px}
-    .hdr{display:flex;align-items:center;gap:12px;border-bottom:3px solid #003b7a;padding-bottom:12px;margin-bottom:16px}
-    .hdr h1{font-size:18px;color:#003b7a;margin:0;font-weight:900}
-    .hdr p{margin:2px 0;font-size:10px;color:#555}
-    .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
-    .kpi{border:1px solid #e2e8f0;border-radius:8px;padding:10px;text-align:center}
-    .kpi-val{font-size:22px;font-weight:900;color:#003b7a}
-    .kpi-lbl{font-size:9px;color:#64748b;margin-top:2px}
-    .act-block{border:1px solid #cbd5e1;border-radius:8px;padding:12px;margin-bottom:14px;page-break-inside:avoid}
-    .act-titulo{font-size:13px;font-weight:800;color:#003b7a;margin-bottom:8px}
-    .act-unit{font-size:10px;font-weight:400;color:#94a3b8}
-    .act-nums{display:flex;gap:16px;margin-bottom:8px}
-    .act-num-box{text-align:center}
-    .act-num-val{font-size:20px;font-weight:900}
-    .act-num-lbl{font-size:9px;color:#94a3b8}
-    .bar-wrap{width:100%;background:#e2e8f0;border-radius:999px;height:18px;overflow:hidden;margin-bottom:3px}
-    .bar-fill{height:18px;border-radius:999px;transition:width .5s}
-    .bar-labels{display:flex;justify-content:space-between;font-size:9px;color:#94a3b8;margin-bottom:8px}
-    .det-table{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
-    .det-table th{background:#f1f5f9;text-align:left;padding:3px 6px;font-size:9px;border-bottom:1px solid #e2e8f0}
-    .det-table td{padding:3px 6px;border-bottom:1px solid #f8fafc}
+    h1{font-size:18px;color:#003b7a;margin:0;font-weight:900}
+    .sub{font-size:10px;color:#555;margin:2px 0}
+    .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+    .kpi{border:1px solid #e2e8f0;border-radius:8px;padding:8px;text-align:center}
+    .kpi-val{font-size:20px;font-weight:900;color:#003b7a}
+    .kpi-lbl{font-size:9px;color:#64748b}
+    .esp-block{margin-bottom:24px;page-break-inside:avoid}
+    .esp-tit{background:#003b7a;color:white;padding:7px 12px;border-radius:6px;font-weight:800;font-size:12px;margin-bottom:10px}
+    .fecha-block{border-left:3px solid #003b7a;padding-left:10px;margin-bottom:10px}
+    .fecha-tit{font-weight:700;color:#003b7a;font-size:10px;margin-bottom:5px}
+    .act-row{padding:4px 0;border-bottom:1px solid #f1f5f9;font-size:10px;display:flex;justify-content:space-between}
+    .act-nom{font-weight:600}.act-area{font-size:9px;color:#94a3b8}
+    .act-val{text-align:right;font-weight:700;color:#003b7a}
+    .act-obs{font-size:9px;color:#64748b;font-style:italic;margin-top:2px}
+    .cual-row{padding:4px 0;border-bottom:1px solid #f1f5f9;font-size:10px}
+    .cual-badge{background:#ede9fe;color:#7c3aed;font-size:8px;padding:1px 5px;border-radius:10px;margin-right:4px;font-weight:700}
+    .adic-badge{background:#e0e7ff;color:#4338ca;font-size:8px;padding:1px 5px;border-radius:10px;margin-right:4px;font-weight:700}
+    .obs{font-size:9px;color:#64748b;font-style:italic;padding-left:8px;margin-top:2px}
+    .sec-tit{font-size:9px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;margin:10px 0 4px;border-top:1px solid #e2e8f0;padding-top:8px}
+    .tbl{width:100%;border-collapse:collapse;font-size:10px}
+    .tbl th{background:#f8fafc;text-align:left;padding:3px 8px;font-size:9px;color:#94a3b8;text-transform:uppercase;border-bottom:1px solid #e2e8f0}
+    .tbl td{padding:3px 8px;border-bottom:1px solid #f8fafc}
+    .tbl tr:last-child td{border-bottom:none}
+    .susp-row{background:#fef9c3;border:1px solid #fde68a;border-radius:4px;padding:4px 8px;margin-bottom:4px;font-size:9px}
+    .maq-row{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:4px 8px;margin-bottom:4px;font-size:9px}
     .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}`;
+
+    const gruposHTML=Object.entries(porEsp).map(([espNom,items])=>{
+      // Resumen por actividad — total del rango seleccionado (siempre incluido)
+      const porActEsp=resumenPorActividad(items.avances,configActs,catalogs);
+      const resumenHTML=Object.keys(porActEsp).length?`<div class="sec-tit">📊 Resumen del período</div><table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody>${Object.values(porActEsp).map(a=>`<tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr>`).join('')}</tbody></table>`:'';
+
+      // Avances por fecha — solo en modo Detallado
+      const porFecha:Record<string,Record<string,unknown>[]>={};
+      items.avances.forEach(av=>{const f=av.fecha as string;if(!porFecha[f])porFecha[f]=[];porFecha[f].push(av);});
+      const fechasHTML=modo!=='detallado'?'':Object.entries(porFecha).sort(([fa],[fb])=>fa.localeCompare(fb)).map(([fecha,avs])=>{
+        const avHTML=avs.map(av=>{
+          const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
+          const arR=catalogs?.areas.find(a=>a.id===(av.area_id as string));
+          const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
+          const pct=cfg?.meta_total&&cfg.tiene_meta?Math.min(100,Math.round((av.acumulado_total_real as number)/cfg.meta_total*100)):null;
+          const esAjuste=String(av.observacion_es||'').startsWith('[AJUSTE]');
+          const obsTexto=esAjuste?String(av.observacion_es||'').replace('[AJUSTE] ',''):(av.observacion_es as string||'');
+          const ajusteBadge=esAjuste?'<span class="adic-badge" style="background:#fef3c7;color:#92400e">⚖️ AJUSTE</span> ':'';
+          const obsHTML=obsTexto&&!isCliente?`<div class="act-obs">${esAjuste?'':'💬 '}"${obsTexto}"</div>`:'';
+          const areaHTML=esAjuste?'':`<div class="act-area">📍 ${arR?.area_es||'—'}</div>`;
+          return `<div class="act-row"><div><div class="act-nom">${ajusteBadge}${aR?.actividad_es||''}</div>${areaHTML}${obsHTML}</div><div><div class="act-val">${(av.cantidad as number)>0?'+':''}${av.cantidad as number} ${av.unidad as string}</div><div style="font-size:9px;color:#64748b">Acum: ${av.acumulado_total_real as number}${pct!==null?` · ${pct}%`:''}</div></div></div>`;
+        }).join('');
+        return `<div class="fecha-block"><div class="fecha-tit">📅 ${fecha}</div>${avHTML}</div>`;
+      }).join('');
+
+      // Cualitativas
+      const cualHTML=items.cual.length?`<div class="sec-tit">📋 Actividades cualitativas</div>${items.cual.map(a=>{
+        const aR=catalogs?.especialidades_actividades.find(e=>e.id===(a.actividad_id as string));
+        return `<div class="cual-row"><div><span class="cual-badge">CUALITATIVA</span><strong>${aR?.actividad_es||''}</strong> <span style="font-size:9px;color:#94a3b8">${a.fecha as string}</span></div><div class="obs">"${(a.observacion_es as string)||''}"</div></div>`;
+      }).join('')}`:'';
+
+      // Adicionales
+      const adicHTML=items.adic.length?`<div class="sec-tit">➕ Actividades adicionales</div>${items.adic.map(a=>`<div class="cual-row"><div><span class="adic-badge">ADICIONAL</span><strong>${a.nombre as string}</strong> <span style="font-size:9px;color:#94a3b8">${a.fecha as string}</span></div><div class="obs">"${(a.descripcion_ejecutado as string)||''}"</div></div>`).join('')}`:'';
+
+      // Personal
+      const porDoc:Record<string,{nombre:string;cargo:string;horas:number;asistio:boolean;motivo:string;novedad:string}>={};
+      items.personal.forEach(a=>{
+        const doc=a.documento_personal as string;
+        const pi=catalogs?.personal.find(p=>p.documento===doc);
+        if(!porDoc[doc]) porDoc[doc]={nombre:pi?.nombre||doc,cargo:pi?.cargo_es||'—',horas:0,asistio:false,motivo:'',novedad:''};
+        porDoc[doc].horas+=parseFloat(String(a.horas_trabajadas||0));
+        if(a.asistio) porDoc[doc].asistio=true;
+        if(a.motivo_ausencia) porDoc[doc].motivo=a.motivo_ausencia as string;
+        if(a.novedad) porDoc[doc].novedad=a.novedad as string;
+      });
+      const listaP=Object.values(porDoc);
+      const personalHTML=listaP.length?`<div class="sec-tit">👥 Personal — ${espNom}</div><table class="tbl"><thead><tr><th>N</th><th>Nombre</th><th>Cargo</th><th>Estado</th><th>Horas</th><th>Motivo / Novedad</th></tr></thead><tbody>${listaP.map((p,i)=>`<tr><td>${i+1}</td><td><strong>${p.nombre}</strong></td><td>${p.cargo}</td><td>${p.asistio?'<span style="color:#16a34a;font-weight:700">✅ Asistió</span>':'<span style="color:#dc2626;font-weight:700">❌ Ausente</span>'}</td><td><span style="background:#eff6ff;color:#1d4ed8;font-weight:700;padding:1px 5px;border-radius:4px">${p.horas}h</span></td><td style="color:#64748b;font-style:italic">${p.motivo||p.novedad||'—'}</td></tr>`).join('')}</tbody></table>`:'';
+
+      // Suspensiones
+      const suspsHTML=items.susps.length?`<div class="sec-tit">⚠️ Suspensiones</div>${items.susps.map(s=>`<div class="susp-row"><strong>${s.es_general?'General':'Por actividad'}</strong> · ${s.descripcion as string}${s.hora_inicio?` · ${s.hora_inicio as string}–${s.hora_fin as string}`:''}</div>`).join('')}`:'';
+
+      // Maquinaria
+      const maqHTML=items.maq.length?`<div class="sec-tit">🚜 Maquinaria</div>${items.maq.map(m=>{
+        const maqInfo=m.maquinaria as Record<string,string>|null;
+        const mn=maqInfo?`${maqInfo.item_id||maqInfo.nombre||''} (${maqInfo.tipo||''})`:m.maquinaria_id as string;
+        return `<div class="maq-row"><strong>${mn}</strong>${m.hora_inicio?` · ${m.hora_inicio as string}–${m.hora_fin as string}`:''}${m.descripcion?` · ${m.descripcion as string}`:''}${m.novedad?` · Novedad: ${m.novedad as string}`:''}</div>`;
+      }).join('')}`:'';
+
+      return `<div class="esp-block"><div class="esp-tit">🌿 ${espNom}</div>${resumenHTML}${fechasHTML}${cualHTML}${adicHTML}${isCliente?'':personalHTML}${isCliente?'':suspsHTML}${isCliente?'':maqHTML}</div>`;
+    }).join('');
+
     const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Informe PDS 360</title><style>${css}</style></head><body>
-    <div class="hdr"><div><h1>Powerchina · PDS 360 — Informe de Avance</h1>
-    <p>Período: <strong>${fechaIni}</strong> al <strong>${fechaFin}</strong>${soloAp?' · Solo aprobados':''}</p></div></div>
+    <h1>Powerchina · PDS 360 — Informe de Avance</h1>
+    <p class="sub">Período: <strong>${fechaIni}</strong> al <strong>${fechaFin}</strong>${soloAp?' · Solo aprobados':''}</p>
     <div class="kpis">
       <div class="kpi"><div class="kpi-val">${(resumen.dias as number)||0}</div><div class="kpi-lbl">Reportes</div></div>
       <div class="kpi"><div class="kpi-val">${(resumen.horas_hombre as number)||0}h</div><div class="kpi-lbl">Horas-hombre</div></div>
       <div class="kpi"><div class="kpi-val">${(resumen.horas_perdidas_clima as number)||0}h</div><div class="kpi-lbl">Horas perdidas</div></div>
     </div>
-    ${actRows}
+    ${gruposHTML}
     <div class="ftr">Powerchina PDS 360 · Generado: ${new Date().toLocaleString('es-CO')}</div>
     </body></html>`;
     const win=window.open('','_blank');
     if(win){win.document.write(html);win.document.close();setTimeout(()=>win.print(),600);}
+    }catch(e:unknown){console.error('Error PDF:',e);showToast('err','Error generando PDF: '+((e as Error)?.message||'Error desconocido'));}
   }
 
   function exportExcel(){
@@ -1646,17 +2495,61 @@ function InformesModule({user,catalogs,configActs,showToast}:{
       if(!isC) o.Técnico=rep?.usuario_nombre||'';
       return o;
     });
+    const cual=((data.cualitativas||[]) as Record<string,unknown>[]);
+    const adic=((data.adicionales||[]) as Record<string,unknown>[]);
+    const cualRows=cual.map(a=>{
+      const aR=catalogs?.especialidades_actividades.find(e=>e.id===(a.actividad_id as string));
+      return{Fecha:a.fecha,Especialidad:aR?.especialidad_es||'',Actividad:aR?.actividad_es||'',Tipo:'Cualitativa','Descripción / Observación':a.observacion_es||''};
+    });
+    const adicRows=adic.map(a=>({'Fecha':a.fecha,'Actividad adicional':a.nombre,Tipo:'Adicional (no planeada)','Descripción ejecutado':a.descripcion_ejecutado||''}));
+    const porAct=resumenPorActividad(avances,configActs,catalogs);
+    const resumenRows=Object.values(porAct).map(a=>({
+      Actividad:a.nombre,Unidad:a.unidad,Total_Rango:a.totalRango,
+      Acumulado_Historico:a.acumuladoHistorico,Meta:a.meta||'—',
+      Avance_Pct:a.pct!==null?`${a.pct}%`:'—',
+    }));
     const wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Avance');
-    if(!isC){
-      const aRows=asistencia.map(a=>({Fecha:a.fecha,Documento:a.documento_personal,Asistió:a.asistio?'Sí':'No',Motivo:a.motivo_ausencia||'',Horas:a.horas_trabajadas}));
-      XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(aRows),'Asistencia');
-    }
-    XLSX.writeFile(wb,`PDS360_${fechaIni}_${fechaFin}.xlsx`);
+    if(resumenRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(resumenRows),'Resumen');
+    if(modo==='detallado') XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Avance');
+    if(cualRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(cualRows),'Cualitativas');
+    if(adicRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(adicRows),'Adicionales');
+    // Personal con nombres
+    const aRows=asistencia.map(a=>{
+      const pi=catalogs?.personal.find(p=>p.documento===(a.documento_personal as string));
+      return{
+        Fecha:a.fecha,
+        Nombre:pi?.nombre||a.documento_personal,
+        Documento:a.documento_personal,
+        Cargo:pi?.cargo_es||'—',
+        Asistió:(a.asistio as boolean)?'Sí':'No',
+        Horas_trabajadas:a.horas_trabajadas,
+        Motivo:a.motivo_ausencia||'—',
+        Novedad:(a.novedad as string)||'—',
+        Ausencia_parcial:(a.ausencia_parcial as boolean)?'Sí':'No',
+        Hora_ausencia_ini:(a.hora_ausencia_ini as string)||'—',
+        Hora_ausencia_fin:(a.hora_ausencia_fin as string)||'—',
+      };
+    });
+    if(aRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(aRows),'Personal');
+    // Suspensiones
+    const suspRows=((data.suspensiones||[]) as Record<string,unknown>[]).map(s=>({
+      Fecha:s.fecha,Tipo:s.tipo_susp||'clima',General:(s.es_general as boolean)?'Sí':'No',
+      Descripcion:s.descripcion,Hora_inicio:s.hora_inicio||'—',Hora_fin:s.hora_fin||'—',
+      Horas_perdidas:s.horas_perdidas||0,
+    }));
+    if(suspRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(suspRows),'Suspensiones');
+    // Maquinaria
+    const maqRows=((data.maquinaria||[]) as Record<string,unknown>[]).map(m=>({
+      Fecha:m.fecha,Maquinaria:m.maquinaria_id,
+      Hora_inicio:m.hora_inicio||'—',Hora_fin:m.hora_fin||'—',
+      Descripcion:m.descripcion||'—',Novedad:(m.novedad as string)||'—',
+    }));
+    if(maqRows.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(maqRows),'Maquinaria');
+    if(!wb.SheetNames.length) XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Avance');
+    const espsSel=espIds.length>0?'_seleccion':'_todas';
+    XLSX.writeFile(wb,`PDS360_${fechaIni}_${fechaFin}${espsSel}.xlsx`);
     showToast('ok','Excel descargado');
   }
-
-  function toggle(arr:string[],setArr:(v:string[])=>void,val:string){setArr(arr.includes(val)?arr.filter(x=>x!==val):[...arr,val]);}
 
   return(
     <div className="space-y-4">
@@ -1666,8 +2559,20 @@ function InformesModule({user,catalogs,configActs,showToast}:{
           <div><label className="label">Hasta</label><input type="date" className="input" value={fechaFin} onChange={e=>setFechaFin(e.target.value)}/></div>
           <button className="btn-primary" onClick={fetchData} disabled={loading}>{loading?'Cargando…':'Consultar'}</button>
         </div>
-        <div><label className="label">Especialidades</label><div className="flex flex-wrap gap-2">{espList.map(e=><button key={e.id} onClick={()=>toggle(espIds,setEspIds,e.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${espIds.includes(e.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{e.especialidad_es}</button>)}</div></div>
+        <div><div className="flex items-center justify-between mb-1"><label className="label">Especialidades</label><div className="flex gap-3"><button type="button" className="text-xs text-blue-600 hover:underline" onClick={()=>setEspIds(espList.map(e=>e.id))}>Seleccionar todas</button><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setEspIds([])}>Ninguna (todas automático)</button></div></div><div className="flex flex-wrap gap-2">{espList.map(e=><button key={e.id} onClick={()=>toggle(espIds,setEspIds,e.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${espIds.includes(e.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{e.especialidad_es}</button>)}</div>{espIds.length===0&&<div className="text-xs text-slate-400 italic mt-1">Sin selección = se incluyen todas las especialidades</div>}</div>
         <div><label className="label">Áreas</label><div className="flex flex-wrap gap-2">{(catalogs?.areas||[]).map(a=><button key={a.id} onClick={()=>toggle(areaIds,setAreaIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${areaIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.area_es}</button>)}</div></div>
+        <div><div className="flex items-center justify-between mb-1"><label className="label">Actividades</label><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setActIds([])}>Ninguna (todas automático)</button></div><div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">{actList.map(a=><button key={a.id} onClick={()=>toggle(actIds,setActIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${actIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.actividad_es}</button>)}</div>{actIds.length===0&&<div className="text-xs text-slate-400 italic mt-1">Sin selección = se incluyen todas las actividades</div>}</div>
+        <div className="flex items-center gap-4 flex-wrap">
+          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirPersonal} onChange={e=>setIncluirPersonal(e.target.checked)}/> Incluir personal/asistencia</label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirMaquinaria} onChange={e=>setIncluirMaquinaria(e.target.checked)}/> Incluir maquinaria</label>
+        </div>
+        <div>
+          <label className="label">Nivel de detalle</label>
+          <div className="flex gap-2">
+            <button type="button" onClick={()=>setModo('resumen')} className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${modo==='resumen'?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600'}`}>📋 Resumen (solo totales del rango)</button>
+            <button type="button" onClick={()=>setModo('detallado')} className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${modo==='detallado'?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600'}`}>📅 Detallado (día a día)</button>
+          </div>
+        </div>
         <div className="flex items-center gap-3 flex-wrap">
           <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={soloAp} onChange={e=>setSoloAp(e.target.checked)}/> Solo aprobados</label>
           <button className="btn-secondary text-xs" onClick={exportExcel} disabled={!data}>📥 Excel</button>
@@ -1693,21 +2598,13 @@ function InformesModule({user,catalogs,configActs,showToast}:{
               </div>
             </div>
 
-            {/* AVANCE POR ACTIVIDAD — en pantalla mejorado con meta y % */}
+            {/* AVANCE POR ACTIVIDAD — resumen del rango, siempre visible */}
             {(data.avances as unknown[]).length>0&&(()=>{
               const avances=data.avances as Record<string,unknown>[];
-              const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;acum:number;pct:number|null}> = {};
-              avances.forEach(av=>{
-                const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
-                const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
-                const id=av.actividad_id as string;
-                if(!porAct[id]) porAct[id]={nombre:aR?.actividad_es||id,unidad:cfg?.unidad_es||'',meta:cfg?.meta_total||null,acum:0,pct:null};
-                porAct[id].acum=Math.max(porAct[id].acum,parseFloat(String(av.acumulado_total_real||0)));
-              });
-              Object.values(porAct).forEach(a=>{if(a.meta)a.pct=Math.min(100,Math.round(a.acum/a.meta*100));});
+              const porAct=resumenPorActividad(avances,configActs,catalogs);
               return(
                 <div className="card p-4">
-                  <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad</h3>
+                  <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad — {fechaIni} a {fechaFin}</h3>
                   <div className="space-y-4">
                     {Object.values(porAct).map((a,i)=>{
                       const color=a.pct===null?'bg-slate-400':a.pct>=90?'bg-emerald-500':a.pct>=50?'bg-blue-500':'bg-amber-500';
@@ -1720,7 +2617,8 @@ function InformesModule({user,catalogs,configActs,showToast}:{
                               <div className="text-xs text-slate-500">{a.unidad}</div>
                             </div>
                             <div className="text-right flex gap-6">
-                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.acum}</div><div className="text-xs text-slate-400">Acumulado</div></div>
+                              <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.totalRango}</div><div className="text-xs text-slate-400">Total del rango</div></div>
+                              <div className="text-center"><div className="text-xl font-black text-slate-500">{a.acumuladoHistorico}</div><div className="text-xs text-slate-400">Acumulado histórico</div></div>
                               {a.meta&&<><div className="text-center"><div className="text-xl font-black text-slate-500">{a.meta}</div><div className="text-xs text-slate-400">Meta</div></div>
                               <div className="text-center"><div className={`text-xl font-black ${tc}`}>{a.pct}%</div><div className="text-xs text-slate-400">Avance</div></div></>}
                             </div>
@@ -1741,7 +2639,210 @@ function InformesModule({user,catalogs,configActs,showToast}:{
               );
             })()}
 
-            {!(data.avances as unknown[]).length&&<div className="card p-6 text-center text-slate-500">Sin datos de avance para este período. Consulta primero.</div>}
+            {/* Vista agrupada por especialidad > fecha — el día a día respeta el modo, personal/maquinaria no */}
+            {(()=>{
+              const repsG=data.reportes as Record<string,unknown>[];
+              const avG=data.avances as Record<string,unknown>[];
+              const cualG=((data.cualitativas||[]) as Record<string,unknown>[]);
+              const adicG=((data.adicionales||[]) as Record<string,unknown>[]);
+              const asistG=((data.asistencia||[]) as Record<string,unknown>[]);
+              const suspG=((data.suspensiones||[]) as Record<string,unknown>[]);
+              const maqG=((data.maquinaria||[]) as Record<string,unknown>[]);
+              const repEspMap:Record<string,string>={};
+              repsG.forEach(r=>{repEspMap[r.id as string]=r.especialidad_id as string;});
+
+              // Agrupar por especialidad
+              const porEsp:Record<string,{
+                avances:Record<string,unknown>[];
+                cual:Record<string,unknown>[];
+                adic:Record<string,unknown>[];
+                personal:Record<string,unknown>[];
+                susps:Record<string,unknown>[];
+                maq:Record<string,unknown>[];
+              }>={};
+
+              const getEspNom=(espId:string)=>catalogs?.especialidades_actividades.find(e=>e.id===espId)?.especialidad_es||espId;
+
+              const addToEsp=(espId:string,tipo:'avances'|'cual'|'adic'|'personal'|'susps'|'maq',item:Record<string,unknown>)=>{
+                if(!espId) return;
+                const nom=getEspNom(espId);
+                if(!porEsp[nom]) porEsp[nom]={avances:[],cual:[],adic:[],personal:[],susps:[],maq:[]};
+                porEsp[nom][tipo].push(item);
+              };
+
+              avG.forEach(av=>addToEsp(av.especialidad_id as string,'avances',av));
+              cualG.forEach(av=>addToEsp(av.especialidad_id as string,'cual',av));
+              adicG.forEach(ad=>addToEsp(repEspMap[ad.reporte_id as string]||'','adic',ad));
+              asistG.forEach(a=>addToEsp(repEspMap[a.reporte_id as string]||'','personal',a));
+              suspG.forEach(s=>addToEsp(repEspMap[s.reporte_id as string]||'','susps',s));
+              maqG.forEach(m=>addToEsp(repEspMap[m.reporte_id as string]||'','maq',m));
+
+              delete porEsp[''];
+              if(!Object.keys(porEsp).length) return null;
+
+              return(
+                <div className="space-y-4">
+                  {Object.entries(porEsp).map(([espNom,items])=>(
+                    <div key={espNom} className="card p-4">
+                      {/* Cabecera especialidad */}
+                      <div className="bg-[#003b7a] text-white px-4 py-2 rounded-lg mb-4 font-bold text-sm">🌿 {espNom}</div>
+
+                      {/* AVANCES CUANTITATIVOS agrupados por fecha — solo en modo Detallado */}
+                      {modo==='detallado'&&(()=>{
+                        const porFecha:Record<string,Record<string,unknown>[]>={};
+                        items.avances.forEach(av=>{
+                          const f=av.fecha as string;
+                          if(!porFecha[f]) porFecha[f]=[];
+                          porFecha[f].push(av);
+                        });
+                        return Object.entries(porFecha).sort(([a],[b])=>a.localeCompare(b)).map(([fecha2,avs])=>{
+                          const repDia=(data.reportes as Record<string,unknown>[]).find(r=>r.fecha===fecha2&&(catalogs?.especialidades_actividades.find(e=>e.id===(r.especialidad_id as string))?.especialidad_es||'')=== espNom);
+                          return(
+                          <div key={fecha2} className="mb-3 border-l-4 border-[#003b7a] pl-4">
+                            <div className="font-bold text-xs text-[#003b7a] mb-2">📅 {fecha2}</div>
+                            {repDia&&<div className="bg-slate-50 border border-slate-200 rounded-lg p-3 mb-3 text-xs"><div className="grid grid-cols-2 sm:grid-cols-4 gap-2"><div><span className="text-slate-400">Jornada</span><div className="font-medium">{repDia.jornada_horas as number}h</div></div><div><span className="text-slate-400">Clima</span><div className="font-medium">{(repDia.clima as string)||'—'}</div></div>{(repDia.charla_preturno as boolean)&&<div className="col-span-2"><span className="text-slate-400">Charla pre-turno</span><div className="font-medium">✅ {(repDia.charla_tema as string)||'Charla realizada'}</div></div>}</div></div>}
+                            {avs.map((av,i)=>{
+                              const aR=catalogs?.especialidades_actividades.find(e=>e.id===(av.actividad_id as string));
+                              const arR=catalogs?.areas.find(a=>a.id===(av.area_id as string));
+                              const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
+                              const pct=cfg?.meta_total&&cfg.tiene_meta?Math.min(100,Math.round((av.acumulado_total_real as number)/cfg.meta_total*100)):null;
+                              return(
+                                <div key={i} className="py-2 border-b border-slate-100">
+                                  <div className="flex items-start justify-between flex-wrap gap-2">
+                                    <div>
+                                      <div className="font-medium text-sm text-[#003b7a]">{aR?.actividad_es||''}</div>
+                                      <div className="text-xs text-slate-400">📍 {arR?.area_es||'—'}</div>
+                                    </div>
+                                    <div className="text-right">
+                                      <div className="font-bold text-sm text-[#003b7a]">{av.cantidad as number} {av.unidad as string}</div>
+                                      <div className="text-xs text-slate-400">Acum: {av.acumulado_total_real as number}{pct!==null&&<span className={`ml-1 font-bold ${pct>=90?'text-emerald-600':pct>=50?'text-blue-600':'text-amber-600'}`}>({pct}%)</span>}</div>
+                                    </div>
+                                  </div>
+                                  {(av.observacion_es as string)&&user.rol!=='cliente'&&<div className="text-xs text-slate-500 mt-1 italic pl-2">💬 "{av.observacion_es as string}"</div>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );});
+                      })()}
+
+                      {/* CUALITATIVAS */}
+                      {items.cual.length>0&&(
+                        <div className="mt-3 mb-3">
+                          <div className="text-xs font-bold text-purple-700 uppercase tracking-wide mb-2">📋 Actividades cualitativas</div>
+                          {items.cual.map((a,i)=>{
+                            const aR=catalogs?.especialidades_actividades.find(e=>e.id===(a.actividad_id as string));
+                            return(
+                              <div key={i} className="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-2">
+                                <div className="font-semibold text-sm text-purple-800">{aR?.actividad_es||'Actividad'}</div>
+                                <div className="text-xs text-slate-500 mt-0.5">{a.fecha as string}</div>
+                                <div className="text-xs text-slate-600 mt-1 italic">"{a.observacion_es as string||'Sin descripción'}"</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* ADICIONALES */}
+                      {items.adic.length>0&&(
+                        <div className="mt-3 mb-3">
+                          <div className="text-xs font-bold text-indigo-700 uppercase tracking-wide mb-2">➕ Actividades adicionales</div>
+                          {items.adic.map((a,i)=>(
+                            <div key={i} className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-2">
+                              <div className="font-semibold text-sm text-indigo-800">{a.nombre as string}</div>
+                              <div className="text-xs text-slate-500 mt-0.5">{a.fecha as string}</div>
+                              <div className="text-xs text-slate-600 mt-1 italic">"{a.descripcion_ejecutado as string||''}"</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* PERSONAL al final de la especialidad — oculto para cliente */}
+                      {items.personal.length>0&&user.rol!=='cliente'&&(()=>{
+                        const porDoc:Record<string,{nombre:string;cargo:string;totalHoras:number;asistio:boolean;motivo:string;novedad:string}>={};
+                        items.personal.forEach(a=>{
+                          const doc=a.documento_personal as string;
+                          const persInfo=catalogs?.personal.find(p=>p.documento===doc);
+                          if(!porDoc[doc]) porDoc[doc]={
+                            nombre:persInfo?.nombre||doc,
+                            cargo:persInfo?.cargo_es||'—',
+                            totalHoras:0,asistio:false,motivo:'',novedad:''
+                          };
+                          porDoc[doc].totalHoras+=parseFloat(String(a.horas_trabajadas||0));
+                          if(a.asistio) porDoc[doc].asistio=true;
+                          if(a.motivo_ausencia) porDoc[doc].motivo=a.motivo_ausencia as string;
+                          if(a.novedad) porDoc[doc].novedad=a.novedad as string;
+                        });
+                        const lista=Object.values(porDoc);
+                        return(
+                          <div className="mt-4 border-t border-slate-200 pt-3">
+                            <div className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">👥 Personal — {espNom}</div>
+                            <table className="w-full text-xs border-collapse">
+                              <thead><tr className="bg-slate-50">
+                                <th className="text-left px-3 py-2 font-medium text-slate-500">Nombre</th>
+                                <th className="text-left px-3 py-2 font-medium text-slate-500">Cargo</th>
+                                <th className="text-center px-3 py-2 font-medium text-slate-500">Estado</th>
+                                <th className="text-center px-3 py-2 font-medium text-slate-500">Horas</th>
+                                <th className="text-left px-3 py-2 font-medium text-slate-500">Motivo / Novedad</th>
+                              </tr></thead>
+                              <tbody>{lista.map((p,i)=>(
+                                <tr key={i} className="border-t border-slate-100">
+                                  <td className="px-3 py-1.5 font-medium">{p.nombre}</td>
+                                  <td className="px-3 py-1.5 text-slate-500">{p.cargo}</td>
+                                  <td className="px-3 py-1.5 text-center">{p.asistio?<span className="text-emerald-600 font-bold">✅</span>:<span className="text-rose-600 font-bold">❌</span>}</td>
+                                  <td className="px-3 py-1.5 text-center"><span className="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded">{p.totalHoras}h</span></td>
+                                  <td className="px-3 py-1.5 text-slate-400 italic text-xs">{p.motivo||p.novedad||'—'}</td>
+                                </tr>
+                              ))}</tbody>
+                            </table>
+                          </div>
+                        );
+                      })()}
+
+                      {/* SUSPENSIONES Y MAQUINARIA al final de la especialidad — oculto para cliente */}
+                      {(items.susps.length>0||items.maq.length>0)&&user.rol!=='cliente'&&(
+                        <div className="mt-4 border-t border-slate-200 pt-3">
+                          <div className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">⚠️ Suspensiones y maquinaria — {espNom}</div>
+
+                          {items.susps.length>0&&(
+                            <div className="mb-3">
+                              <div className="text-xs font-semibold text-amber-700 mb-1">Suspensiones</div>
+                              {items.susps.map((s,i)=>(
+                                <div key={i} className="bg-amber-50 border border-amber-200 rounded-lg p-2 mb-1 text-xs">
+                                  <span className="font-medium">{s.es_general?'🌐 General':'📌 Por actividad'}</span>
+                                  {(s.hora_inicio as string)&&<span className="ml-2 text-slate-500">{s.hora_inicio as string} — {s.hora_fin as string}</span>}
+                                  <div className="text-slate-600 mt-0.5">{s.descripcion as string}</div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {items.maq.length>0&&(
+                            <div>
+                              <div className="text-xs font-semibold text-slate-600 mb-1">🚜 Maquinaria</div>
+                              {items.maq.map((m,i)=>{
+                                const maqInfo=m.maquinaria as Record<string,string>|null;
+                                const maqNom=maqInfo?`${maqInfo.item_id||maqInfo.nombre||''} (${maqInfo.tipo||''})`:m.maquinaria_id as string;
+                                return(
+                                  <div key={i} className="bg-slate-50 border border-slate-200 rounded-lg p-2 mb-1 text-xs">
+                                    <span className="font-medium">{maqNom}</span>
+                                    {(m.hora_inicio as string)&&<span className="ml-2 text-slate-500">{m.hora_inicio as string} — {m.hora_fin as string}</span>}
+                                    {(m.descripcion as string)&&<div className="text-slate-600 mt-0.5">{m.descripcion as string}</div>}
+                                    {(m.novedad as string)&&<div className="text-slate-600 mt-0.5">Novedad: {m.novedad as string}</div>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
+            {!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length&&<div className="card p-6 text-center text-slate-500">Sin datos de avance para este período. Consulta primero.</div>}
           </>
         )}
         {!data&&<div className="card p-6 text-center text-slate-500">Selecciona el período y haz clic en Consultar.</div>}
@@ -1751,21 +2852,120 @@ function InformesModule({user,catalogs,configActs,showToast}:{
 }
 
 // ── CATÁLOGOS — con botones siempre visibles ───────────────────────
+function ItemDatabasesSection(){
+  const[databases,setDatabases]=useState<Record<string,unknown>[]>([]);
+  const[dbSeleccionada,setDbSeleccionada]=useState<string|null>(null);
+  const[items,setItems]=useState<Record<string,unknown>[]>([]);
+  const[filtro,setFiltro]=useState<'todos'|'disponibles'|'bloqueados'>('todos');
+
+  useEffect(()=>{
+    supabase.from('item_databases')
+      .select('*, config_actividades(actividad_id, especialidades_actividades(actividad_es))')
+      .eq('activo',true)
+      .then(({data})=>setDatabases(data||[]));
+  },[]);
+
+  async function cargarItems(dbId:string){
+    setDbSeleccionada(dbId);
+    const{data}=await supabase.from('items_database').select('*').eq('database_id',dbId).order('created_at');
+    setItems(data||[]);
+  }
+
+  async function desbloquearItem(itemId:string){
+    await supabase.from('items_database').update({bloqueado:false,bloqueado_fecha:null,bloqueado_en_reporte:null}).eq('id',itemId);
+    setItems(prev=>prev.map(i=>i.id===itemId?{...i,bloqueado:false}:i));
+  }
+
+  const itemsFiltrados=items.filter(i=>{
+    if(filtro==='disponibles') return !i.bloqueado;
+    if(filtro==='bloqueados') return i.bloqueado;
+    return true;
+  });
+
+  return(
+    <div className="card p-4 mt-2">
+      <h3 className="font-bold text-[#003b7a] mb-3">📦 Bases de datos de ítems</h3>
+      {databases.length===0&&(
+        <div className="text-sm text-slate-500 italic">No hay bases de datos configuradas. Ve a Config. Act. para agregar una.</div>
+      )}
+      {databases.length>0&&(
+        <div className="mb-4">
+          <select className="select w-full" value={dbSeleccionada||''} onChange={e=>cargarItems(e.target.value)}>
+            <option value="">Selecciona una base de datos…</option>
+            {databases.map(db=>(
+              <option key={db.id as string} value={db.id as string}>
+                {db.nombre as string} — {((db.config_actividades as Record<string,unknown>)?.especialidades_actividades as Record<string,string>)?.actividad_es||''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {dbSeleccionada&&(
+        <>
+          <div className="flex gap-2 mb-3">
+            {(['todos','disponibles','bloqueados'] as const).map(f=>(
+              <button key={f} className={`text-xs px-3 py-1.5 rounded-lg font-medium ${filtro===f?'bg-[#003b7a] text-white':'bg-slate-100 text-slate-600'}`} onClick={()=>setFiltro(f)}>
+                {f==='todos'?'Todos':f==='disponibles'?'✅ Disponibles':'🔒 Bloqueados'}
+              </button>
+            ))}
+            <span className="text-xs text-slate-500 ml-auto self-center">{itemsFiltrados.length} ítems</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50">
+                  {items[0]&&Object.keys(items[0].datos as Record<string,string>).map(col=>(
+                    <th key={col} className="text-left px-3 py-2 font-medium text-slate-600">{col}</th>
+                  ))}
+                  <th className="px-3 py-2 text-left font-medium text-slate-600">Estado</th>
+                  <th className="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {itemsFiltrados.map(item=>{
+                  const datos=item.datos as Record<string,string>;
+                  const bloqueado=item.bloqueado as boolean;
+                  return(
+                    <tr key={item.id as string} className="border-t border-slate-100">
+                      {Object.values(datos).map((v,i)=>(
+                        <td key={i} className="px-3 py-2 text-slate-700">{v}</td>
+                      ))}
+                      <td className="px-3 py-2">
+                        {bloqueado?<span className="text-rose-600 font-medium">🔒 Bloqueado</span>:<span className="text-emerald-600 font-medium">✅ Disponible</span>}
+                      </td>
+                      <td className="px-3 py-2">
+                        {bloqueado&&(
+                          <button className="text-xs text-blue-600 hover:underline" onClick={()=>desbloquearItem(item.id as string)}>Desbloquear</button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CatalogosModule({catalogs,onRefresh,showToast}:{catalogs:Catalogs|null;onRefresh:()=>void;showToast:(k:'ok'|'err'|'info',m:string)=>void}){
   return(
     <div className="space-y-4">
       <CatMgr title="Especialidades y Actividades" table="especialidades_actividades" nameField="actividad_es"
         fields={[{n:'especialidad_es',l:'Especialidad (ES)'},{n:'especialidad_en',l:'Especialidad (EN)'},{n:'actividad_es',l:'Actividad (ES)'},{n:'actividad_en',l:'Actividad (EN)'}]}
-        rows={catalogs?.especialidades_actividades||[]} onChanged={onRefresh} showToast={showToast}/>
+        rows={(catalogs?.especialidades_actividades||[]) as unknown as Record<string,unknown>[]} onChanged={onRefresh} showToast={showToast}/>
       <CatMgr title="Áreas" table="areas" nameField="area_es"
         fields={[{n:'area_es',l:'Área (ES)'},{n:'area_en',l:'Área (EN)'}]}
-        rows={catalogs?.areas||[]} onChanged={onRefresh} showToast={showToast}/>
+        rows={(catalogs?.areas||[]) as unknown as Record<string,unknown>[]} onChanged={onRefresh} showToast={showToast}/>
       <CatMgr title="Líderes" table="lideres" nameField="nombre"
         fields={[{n:'nombre',l:'Nombre'},{n:'documento',l:'Documento'},{n:'cargo_es',l:'Cargo (ES)'},{n:'cargo_en',l:'Cargo (EN)'}]}
-        rows={catalogs?.lideres||[]} onChanged={onRefresh} showToast={showToast}/>
+        rows={(catalogs?.lideres||[]) as unknown as Record<string,unknown>[]} onChanged={onRefresh} showToast={showToast}/>
       <CatMgr title="Personal" table="personal" nameField="nombre"
         fields={[{n:'nombre',l:'Nombre'},{n:'documento',l:'Documento'},{n:'cargo_es',l:'Cargo (ES)'},{n:'cargo_en',l:'Cargo (EN)'},{n:'tipo',l:'Tipo'},{n:'empresa',l:'Empresa'}]}
-        rows={catalogs?.personal||[]} onChanged={onRefresh} showToast={showToast}/>
+        rows={(catalogs?.personal||[]) as unknown as Record<string,unknown>[]} onChanged={onRefresh} showToast={showToast}/>
+      <ItemDatabasesSection />
     </div>
   );
 }
@@ -1905,13 +3105,15 @@ function CatMgr({title,table,nameField,fields,rows,onChanged,showToast}:{
 
 // ── MAQUINARIA ────────────────────────────────────────────────────
 function MaquinariaModule({maquinaria,onRefresh,showToast}:{maquinaria:Maq[];onRefresh:()=>void;showToast:(k:'ok'|'err'|'info',m:string)=>void}){
-  const[form,setForm]=useState({tipo:'motosierra',item_id:'',nombre:'',estado:'activo'});
+  const[form,setForm]=useState({tipo:'motosierra',tipoCustom:'',item_id:'',nombre:'',estado:'activo'});
   const[busy,setBusy]=useState(false);
 
   async function addOne(){
     if(!form.item_id){showToast('err','Falta ID del equipo');return;}
+    if(form.tipo==='otro'&&!form.tipoCustom.trim()){showToast('err','Especifica el tipo de maquinaria');return;}
+    const tipoFinal=form.tipo==='otro'?form.tipoCustom.trim():form.tipo;
     setBusy(true);
-    try{const{error}=await supabase.from('maquinaria').insert({...form,horas_acum_operativas:0,horas_acum_standby:0});if(error)throw error;showToast('ok','Equipo agregado');setForm({tipo:'motosierra',item_id:'',nombre:'',estado:'activo'});onRefresh();}
+    try{const{error}=await supabase.from('maquinaria').insert({tipo:tipoFinal,item_id:form.item_id,nombre:form.nombre,estado:form.estado,horas_acum_operativas:0,horas_acum_standby:0});if(error)throw error;showToast('ok','Equipo agregado');setForm({tipo:'motosierra',tipoCustom:'',item_id:'',nombre:'',estado:'activo'});onRefresh();}
     catch(e:unknown){showToast('err',(e as Error)?.message||'Error');}
     finally{setBusy(false);}
   }
@@ -1931,38 +3133,175 @@ function MaquinariaModule({maquinaria,onRefresh,showToast}:{maquinaria:Maq[];onR
   return(
     <div className="card p-4 space-y-3">
       <h3 className="font-bold text-[#003b7a]">Maquinaria ({maquinaria.length} equipos)</h3>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <div><label className="label">Tipo</label><select className="select" value={form.tipo} onChange={e=>setForm({...form,tipo:e.target.value})}><option value="motosierra">Motosierra</option><option value="chipeadora">Chipeadora</option><option value="camion">Camión</option><option value="otro">Otro</option></select></div>
-        <div><label className="label">ID único</label><input className="input" value={form.item_id} onChange={e=>setForm({...form,item_id:e.target.value})} placeholder="MS-009"/></div>
-        <div><label className="label">Nombre</label><input className="input" value={form.nombre} onChange={e=>setForm({...form,nombre:e.target.value})}/></div>
-        <div><label className="label">Estado</label><select className="select" value={form.estado} onChange={e=>setForm({...form,estado:e.target.value})}><option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="mantenimiento">Mantenimiento</option></select></div>
-      </div>
-      <button className="btn-primary text-xs" disabled={busy} onClick={addOne}>+ Agregar equipo</button>
-      <div className="space-y-2">
-        {maquinaria.map(m=>(
-          <div key={m.id} className={`flex items-center gap-2 p-2 rounded-lg border ${m.estado==='inactivo'?'bg-slate-50 border-slate-200 opacity-60':'bg-white border-slate-200'}`}>
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-sm">{m.item_id} — {m.nombre}</div>
-              <div className="text-xs text-slate-500">{m.tipo} · Op: {(m.horas_acum_operativas||0).toFixed(1)}h · SB: {(m.horas_acum_standby||0).toFixed(1)}h</div>
-            </div>
-            <select className="select text-xs w-32 flex-shrink-0" value={m.estado} onChange={e=>cambiarEstado(m,e.target.value)}>
-              <option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="mantenimiento">Mantenimiento</option>
+      <div className="bg-slate-50 rounded-lg p-3 border border-slate-200 space-y-3">
+        <div className="font-semibold text-sm text-slate-700">Agregar equipo</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div><label className="label">Tipo</label>
+            <select className="select" value={form.tipo} onChange={e=>setForm({...form,tipo:e.target.value,tipoCustom:''})}>
+              <option value="motosierra">Motosierra</option>
+              <option value="chipeadora">Chipeadora</option>
+              <option value="camion">Camión</option>
+              <option value="volqueta">Volqueta</option>
+              <option value="excavadora">Excavadora</option>
+              <option value="retroexcavadora">Retroexcavadora</option>
+              <option value="otro">Otro…</option>
             </select>
-            <button className="text-xs px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200 flex-shrink-0" onClick={()=>eliminar(m)} disabled={busy}>Eliminar</button>
           </div>
-        ))}
+          {form.tipo==='otro'&&<div><label className="label">¿Cuál tipo?</label><input className="input" value={form.tipoCustom} onChange={e=>setForm({...form,tipoCustom:e.target.value})} placeholder="Ej: Volqueta doble troque"/></div>}
+          <div><label className="label">ID único</label><input className="input" value={form.item_id} onChange={e=>setForm({...form,item_id:e.target.value})} placeholder="MS-009"/></div>
+          <div><label className="label">Nombre / descripción</label><input className="input" value={form.nombre} onChange={e=>setForm({...form,nombre:e.target.value})}/></div>
+          <div><label className="label">Estado inicial</label><select className="select" value={form.estado} onChange={e=>setForm({...form,estado:e.target.value})}><option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="mantenimiento">Mantenimiento</option></select></div>
+        </div>
+        <button className="btn-primary text-xs" disabled={busy} onClick={addOne}>+ Agregar equipo</button>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="table w-full text-sm">
+          <thead><tr><th>Código</th><th>Tipo</th><th>Nombre</th><th>Horas op.</th><th>Stand-by</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {maquinaria.map(m=>(
+              <tr key={m.id} className={m.estado==='inactivo'?'opacity-50':''}>
+                <td className="font-semibold text-[#003b7a]">{m.item_id}</td>
+                <td>{m.tipo}</td>
+                <td className="text-slate-600">{m.nombre||'—'}</td>
+                <td className="text-emerald-600">{(m.horas_acum_operativas||0).toFixed(1)}h</td>
+                <td className="text-amber-500">{(m.horas_acum_standby||0).toFixed(1)}h</td>
+                <td>
+                  <select className="select text-xs w-32" value={m.estado} onChange={e=>cambiarEstado(m,e.target.value)}>
+                    <option value="activo">Activo</option>
+                    <option value="inactivo">Inactivo</option>
+                    <option value="mantenimiento">Mantenimiento</option>
+                  </select>
+                </td>
+                <td>
+                  <button className="text-xs px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={()=>eliminar(m)} disabled={busy}>Eliminar</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!maquinaria.length&&<div className="text-sm text-slate-500 text-center py-4">Sin equipos registrados.</div>}
       </div>
     </div>
   );
 }
 
 // ── CONFIG ACTIVIDADES — con nombres visibles y editar/eliminar ────
-function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
-  configActs:ConfigAct[]; catalogs:Catalogs|null; onRefresh:()=>void;
+function ConfigActModule({user,configActs,catalogs,onRefresh,showToast}:{
+  user:Profile; configActs:ConfigAct[]; catalogs:Catalogs|null; onRefresh:()=>void;
   showToast:(k:'ok'|'err'|'info',m:string)=>void;
 }){
   const[form,setForm]=useState({especialidad_id:'',actividad_id:'',tipo:'A',unidad_es:'',unidad_en:'',meta_total:'',acumulado_previo:'',rendimiento_esperado:'',rendimiento_por:'cuadrilla',tiene_meta:true,es_medible:true});
   const[busy,setBusy]=useState(false);
+  const[dbForm,setDbForm]=useState({nombre:'',bloqueo_tipo:'permanente' as 'permanente'|'temporal',columnas:[{nombre:'ID',tipo:'text'},{nombre:'Nombre',tipo:'text'}] as {nombre:string;tipo:string}[]});
+  const[dbBusy,setDbBusy]=useState(false);
+  const[existingDb,setExistingDb]=useState<ItemDatabase|null>(null);
+  const[dbItems,setDbItems]=useState<ItemDB[]>([]);
+  const[showDbPanel,setShowDbPanel]=useState(false);
+  const[tieneDatabase,setTieneDatabase]=useState(false);
+  const[dbNombre,setDbNombre]=useState('');
+  const[dbColumnas,setDbColumnas]=useState<string[]>(['ID']);
+  const[dbBloqueoTipo,setDbBloqueoTipo]=useState<'permanente'|'temporal'>('permanente');
+  const[dbItemsNuevos,setDbItemsNuevos]=useState<Record<string,string>[]>([]);
+  const[nuevaColumna,setNuevaColumna]=useState('');
+  const[itemManual,setItemManual]=useState<Record<string,string>>({});
+  const[mostrarFormItem,setMostrarFormItem]=useState(false);
+  const[ajusteFor,setAjusteFor]=useState<string|null>(null);
+  const[ajusteForm,setAjusteForm]=useState({fecha:today(),cantidad:'',motivo:''});
+  const[ajusteBusy,setAjusteBusy]=useState(false);
+
+  async function recalcularAcumulado(actividadId:string){
+    const{data}=await supabase.from('avance_diario').select('id,fecha,created_at,cantidad')
+      .eq('actividad_id',actividadId).neq('unidad','cualitativo').order('fecha',{ascending:true}).order('created_at',{ascending:true});
+    let run=0;
+    for(const r of (data||[]) as Record<string,unknown>[]){
+      const anterior=run;
+      run+=parseFloat(String(r.cantidad||0));
+      if(r.acumulado_anterior!==anterior||r.acumulado_total!==run){
+        await supabase.from('avance_diario').update({acumulado_anterior:anterior,acumulado_total:run}).eq('id',r.id as string);
+      }
+    }
+  }
+
+  async function guardarAjuste(cfg:ConfigAct){
+    const cant=parseFloat(ajusteForm.cantidad);
+    if(!ajusteForm.fecha){showToast('err','Indica la fecha del ajuste');return;}
+    if(!cant||isNaN(cant)){showToast('err','Indica una cantidad de ajuste distinta de cero (puede ser negativa)');return;}
+    if(!ajusteForm.motivo.trim()){showToast('err','Indica el motivo del ajuste');return;}
+    setAjusteBusy(true);
+    try{
+      const{data:rep,error:re}=await supabase.from('reportes_avance').insert({
+        fecha:ajusteForm.fecha,usuario_id:user.id,usuario_nombre:`${user.nombre} (ajuste admin)`,
+        especialidad_id:cfg.especialidad_id,jornada_horas:0,clima:'despejado',charla_preturno:false,
+        estado:'aprobado',aprobado_por:user.id,aprobado_en:new Date().toISOString(),
+      }).select().single();
+      if(re||!rep) throw new Error(re?.message||'Error creando el reporte de ajuste');
+      const{error:avErr}=await supabase.from('avance_diario').insert({
+        reporte_id:(rep as Record<string,unknown>).id as string,fecha:ajusteForm.fecha,usuario_id:user.id,
+        actividad_id:cfg.actividad_id,especialidad_id:cfg.especialidad_id,area_id:null,
+        cantidad:cant,unidad:cfg.unidad_es,acumulado_anterior:0,acumulado_total:0,
+        observacion_es:`[AJUSTE] ${ajusteForm.motivo.trim()}`,
+      });
+      if(avErr) throw new Error(avErr.message);
+      await recalcularAcumulado(cfg.actividad_id);
+      showToast('ok','✅ Ajuste registrado y acumulado recalculado');
+      setAjusteFor(null); setAjusteForm({fecha:today(),cantidad:'',motivo:''});
+      onRefresh();
+    } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
+    finally{ setAjusteBusy(false); }
+  }
+
+  async function loadItemDb(cfgId:string){
+    const{data}=await supabase.from('item_databases').select('*').eq('config_actividad_id',cfgId).maybeSingle();
+    if(data){
+      const db=data as ItemDatabase;
+      setExistingDb(db);
+      setDbForm({nombre:db.nombre,bloqueo_tipo:db.bloqueo_tipo,columnas:db.columnas as {nombre:string;tipo:string}[]});
+      const{data:items}=await supabase.from('items_database').select('*').eq('database_id',db.id).limit(5);
+      setDbItems((items||[]) as ItemDB[]);
+    } else { setExistingDb(null); }
+    setShowDbPanel(true);
+  }
+
+  async function saveItemDb(cfgId:string){
+    if(!dbForm.nombre.trim()||!dbForm.columnas.length){showToast('err','Nombre y al menos una columna requeridos');return;}
+    setDbBusy(true);
+    try{
+      if(existingDb){
+        await supabase.from('item_databases').update({nombre:dbForm.nombre,bloqueo_tipo:dbForm.bloqueo_tipo,columnas:dbForm.columnas}).eq('id',existingDb.id);
+      } else {
+        await supabase.from('item_databases').insert({config_actividad_id:cfgId,nombre:dbForm.nombre,bloqueo_tipo:dbForm.bloqueo_tipo,columnas:dbForm.columnas,activo:true});
+        await supabase.from('config_actividades').update({tiene_items_unicos:true}).eq('id',cfgId);
+      }
+      showToast('ok','Base de datos guardada'); onRefresh(); loadItemDb(cfgId);
+    } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
+    finally{ setDbBusy(false); }
+  }
+
+  function uploadItemsExcel(cfgId:string,file:File){
+    const cfg=configActs.find(c=>c.id===cfgId);
+    if(!cfg) return;
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      try{
+        const wb=XLSX.read(ev.target?.result,{type:'binary'});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        const rows=XLSX.utils.sheet_to_json(ws) as Record<string,unknown>[];
+        if(!rows.length){showToast('err','Excel vacío');return;}
+        let dbId=existingDb?.id;
+        if(!dbId){
+          const{data:newDb}=await supabase.from('item_databases').insert({config_actividad_id:cfgId,nombre:dbForm.nombre||'Base de datos',bloqueo_tipo:dbForm.bloqueo_tipo,columnas:dbForm.columnas,activo:true}).select().single();
+          if(newDb) dbId=(newDb as Record<string,unknown>).id as string;
+          await supabase.from('config_actividades').update({tiene_items_unicos:true}).eq('id',cfgId);
+        }
+        if(!dbId) return;
+        const payload=rows.map(r=>({database_id:dbId,datos:Object.fromEntries(Object.entries(r).map(([k,v])=>[k,String(v||'')])),bloqueado:false,bloqueado_fecha:null,bloqueado_en_reporte:null}));
+        await supabase.from('items_database').insert(payload);
+        showToast('ok',`${payload.length} ítems cargados`); onRefresh(); loadItemDb(cfgId);
+      } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error al leer Excel'); }
+    };
+    reader.readAsBinaryString(file);
+  }
   const esps=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades.filter(e=>e.activo!==false)):[],[catalogs]);
   const acts=useMemo(()=>catalogs&&form.especialidad_id?actsForEsp(catalogs.especialidades_actividades.filter(e=>e.activo!==false),form.especialidad_id):[],[catalogs,form.especialidad_id]);
   const allActs=useMemo(()=>catalogs?.especialidades_actividades||[],[catalogs]);
@@ -1975,22 +3314,40 @@ function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
 
   async function save(){
     if(!form.actividad_id){showToast('err','Selecciona una actividad');return;}
-    if(form.es_medible&&form.tipo!=='D'&&!form.unidad_es){showToast('err','Ingresa la unidad de medida');return;}
-    if(form.es_medible&&form.tiene_meta&&form.tipo!=='D'&&!form.meta_total){showToast('err','Ingresa la meta total');return;}
+    if(form.tipo!=='D'&&!form.unidad_es){showToast('err','Ingresa la unidad de medida');return;}
+    if(form.tipo==='A'&&!form.meta_total){showToast('err','Ingresa la meta total (requerida para tipo A)');return;}
     setBusy(true);
     try{
-      const payload={
-        especialidad_id:form.especialidad_id, actividad_id:form.actividad_id,
-        tipo:form.tipo, unidad_es:form.unidad_es||'N/A', unidad_en:form.unidad_en||'N/A',
-        tiene_meta:!!(form.tiene_meta&&form.es_medible&&form.tipo!=='D'),
-        es_medible:form.tipo==='D'?false:!!form.es_medible,
-        meta_total:form.tiene_meta&&form.es_medible&&form.meta_total&&form.tipo!=='D'?parseFloat(form.meta_total):null,
+      const payload=form.tipo==='D'?{
+        especialidad_id:form.especialidad_id,actividad_id:form.actividad_id,
+        tipo:'D',es_medible:false,tiene_meta:false,meta_total:null,
+        unidad_es:'cualitativo',unidad_en:'qualitative',
+        tiene_items_unicos:false,rendimiento_esperado:null,rendimiento_por:null,
+        acumulado_previo:0,activo:true,
+      }:{
+        especialidad_id:form.especialidad_id,actividad_id:form.actividad_id,
+        tipo:form.tipo,unidad_es:form.unidad_es||'N/A',unidad_en:form.unidad_en||'N/A',
+        tiene_meta:!!(form.tiene_meta&&form.es_medible),
+        es_medible:!!form.es_medible,
+        meta_total:form.tiene_meta&&form.es_medible&&form.meta_total?parseFloat(form.meta_total):null,
         acumulado_previo:parseFloat(form.acumulado_previo||'0'),
         rendimiento_esperado:form.rendimiento_esperado?parseFloat(form.rendimiento_esperado):null,
-        rendimiento_por:form.rendimiento_por, activo:true,
+        rendimiento_por:form.rendimiento_por,activo:true,
       };
-      const{error}=await supabase.from('config_actividades').upsert(payload,{onConflict:'actividad_id'});
+      const{error}=await supabase.from('config_actividades').upsert(payload as unknown as Record<string,unknown>,{onConflict:'actividad_id'});
       if(error) throw error;
+      if(tieneDatabase&&dbNombre.trim()&&dbItemsNuevos.length>0){
+        const{data:savedCfg}=await supabase.from('config_actividades').select('id').eq('actividad_id',form.actividad_id).single();
+        if(savedCfg){
+          const cfgId=(savedCfg as Record<string,unknown>).id as string;
+          const{data:dbSaved}=await supabase.from('item_databases').upsert({config_actividad_id:cfgId,nombre:dbNombre.trim(),columnas:dbColumnas.map(c=>({nombre:c})),bloqueo_tipo:dbBloqueoTipo,activo:true}).select().single();
+          if(dbSaved){
+            const dbId=(dbSaved as Record<string,unknown>).id as string;
+            await supabase.from('items_database').delete().eq('database_id',dbId);
+            await supabase.from('items_database').insert(dbItemsNuevos.map(item=>({database_id:dbId,datos:item,bloqueado:false})));
+          }
+        }
+      }
       showToast('ok','✅ Configuración guardada'); onRefresh();
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setBusy(false); }
@@ -2029,7 +3386,11 @@ function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
         <div><label className="label">Tipo de actividad</label>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {[{v:'A',l:'A — Con meta',d:'Cantidad con meta total definida'},{v:'B',l:'B — Acumulativa',d:'Acumula sin límite'},{v:'C',l:'C — Ítems únicos',d:'Ítems con ID único'},{v:'D',l:'D — Cualitativa',d:'Solo descripción, sin cantidad'}].map(t=>(
-              <button key={t.v} onClick={()=>setForm({...form,tipo:t.v})}
+              <button key={t.v} onClick={()=>{
+                if(t.v==='D') setForm({...form,tipo:'D',es_medible:false,tiene_meta:false,unidad_es:'cualitativo',unidad_en:'qualitative'});
+                else if(t.v==='B'||t.v==='C') setForm({...form,tipo:t.v,tiene_meta:false,es_medible:true});
+                else setForm({...form,tipo:t.v,tiene_meta:true,es_medible:true});
+              }}
                 className={`p-2 rounded-lg border text-xs text-left transition-colors ${form.tipo===t.v?'bg-[#003b7a] text-white border-[#003b7a]':'bg-white border-slate-300 text-slate-700 hover:border-[#003b7a]'}`}>
                 <div className="font-bold">{t.l}</div>
                 <div className={`mt-0.5 ${form.tipo===t.v?'text-blue-200':'text-slate-400'}`}>{t.d}</div>
@@ -2044,6 +3405,8 @@ function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
             <div><label className="label">Unidad (EN)</label><input className="input" value={form.unidad_en} onChange={e=>setForm({...form,unidad_en:e.target.value})}/></div>
             {(form.tipo==='A')&&<>
               <div><label className="label">Meta total del proyecto</label><input type="number" className="input" value={form.meta_total} onChange={e=>setForm({...form,meta_total:e.target.value})} placeholder="Ej: 3466"/></div>
+            </>}
+            {(form.tipo==='A'||form.tipo==='B')&&<>
               <div><label className="label">Acumulado previo (ya ejecutado antes)</label><input type="number" className="input" value={form.acumulado_previo} onChange={e=>setForm({...form,acumulado_previo:e.target.value})} placeholder="0"/></div>
             </>}
             <div><label className="label">Rendimiento esperado</label><input type="number" className="input" value={form.rendimiento_esperado} onChange={e=>setForm({...form,rendimiento_esperado:e.target.value})}/></div>
@@ -2057,7 +3420,168 @@ function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
         {form.tipo==='D'&&<p className="text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded p-2">En el reporte diario, el técnico solo podrá escribir una descripción de lo ejecutado. No se pide cantidad ni área.</p>}
       </div>
 
+      {/* BASE DE DATOS DE ÍTEMS */}
+      <div className="border border-slate-200 rounded-xl p-4 mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="font-bold text-sm text-[#003b7a]">📦 Base de datos de ítems</div>
+            <div className="text-xs text-slate-500">Ej: inventario de árboles, puntos de muestreo</div>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" className={`text-sm px-4 py-1.5 rounded-lg font-medium ${!tieneDatabase?'bg-[#003b7a] text-white':'bg-slate-100 text-slate-600'}`} onClick={()=>setTieneDatabase(false)}>No</button>
+            <button type="button" className={`text-sm px-4 py-1.5 rounded-lg font-medium ${tieneDatabase?'bg-[#003b7a] text-white':'bg-slate-100 text-slate-600'}`} onClick={()=>setTieneDatabase(true)}>Sí</button>
+          </div>
+        </div>
+        {tieneDatabase&&(
+          <div className="space-y-4">
+            <div>
+              <label className="text-xs font-medium text-slate-600 block mb-1">Nombre de la base</label>
+              <input className="input w-full" placeholder="Ej: Inventario árboles BSL8" value={dbNombre} onChange={e=>setDbNombre(e.target.value)}/>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-slate-600 block mb-2">Tipo de bloqueo al usar un ítem</label>
+              <div className="flex gap-6">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" name="bloqueo_nuevo" checked={dbBloqueoTipo==='permanente'} onChange={()=>setDbBloqueoTipo('permanente')} className="mt-0.5"/>
+                  <div><div className="text-sm font-medium">Permanente</div><div className="text-xs text-slate-500">Bloqueado para siempre al usarse</div></div>
+                </label>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" name="bloqueo_nuevo" checked={dbBloqueoTipo==='temporal'} onChange={()=>setDbBloqueoTipo('temporal')} className="mt-0.5"/>
+                  <div><div className="text-sm font-medium">Temporal</div><div className="text-xs text-slate-500">Bloqueado solo el día que se usa</div></div>
+                </label>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-slate-600 block mb-2">Columnas de la base</label>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {dbColumnas.map((col,i)=>(
+                  <div key={i} className="flex items-center gap-1 bg-blue-50 border border-blue-200 rounded-lg px-2 py-1">
+                    <span className="text-sm text-blue-800 font-medium">{col}</span>
+                    {dbColumnas.length>1&&<button type="button" className="text-blue-400 hover:text-rose-500 ml-1" onClick={()=>setDbColumnas(prev=>prev.filter((_,idx)=>idx!==i))}>✕</button>}
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input className="input flex-1 text-sm" placeholder="Nombre de columna..." value={nuevaColumna} onChange={e=>setNuevaColumna(e.target.value)}
+                  onKeyDown={e=>{if(e.key==='Enter'&&nuevaColumna.trim()){setDbColumnas(p=>[...p,nuevaColumna.trim()]);setNuevaColumna('');}}}/>
+                <button type="button" className="btn-secondary text-sm" onClick={()=>{if(nuevaColumna.trim()){setDbColumnas(p=>[...p,nuevaColumna.trim()]);setNuevaColumna('');}}}>+ Columna</button>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-slate-600 block mb-2">Ítems ({dbItemsNuevos.length} cargados)</label>
+              <div className="flex gap-2 mb-3">
+                <label className="btn-secondary text-sm cursor-pointer">
+                  📥 Cargar Excel
+                  <input type="file" accept=".xlsx,.xls" className="hidden" onChange={async e=>{
+                    const file=e.target.files?.[0];if(!file)return;
+                    const XLSX=await import('xlsx');
+                    const buf=await file.arrayBuffer();
+                    const wb=XLSX.read(buf);
+                    const ws=wb.Sheets[wb.SheetNames[0]];
+                    const rows=XLSX.utils.sheet_to_json(ws) as Record<string,unknown>[];
+                    if(rows.length>0){
+                      const cols=Object.keys(rows[0]);
+                      setDbColumnas(cols);
+                      setDbItemsNuevos(rows.map(r=>Object.fromEntries(Object.entries(r).map(([k,v])=>[k,String(v)]))));
+                    }
+                  }}/>
+                </label>
+                <button type="button" className="btn-secondary text-sm" onClick={()=>{setItemManual(Object.fromEntries(dbColumnas.map(c=>[c,''])));setMostrarFormItem(true);}}>+ Agregar manual</button>
+              </div>
+              {mostrarFormItem&&(
+                <div className="border border-blue-200 bg-blue-50 rounded-xl p-3 mb-3">
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    {dbColumnas.map(col=>(
+                      <div key={col}>
+                        <label className="text-xs text-slate-500 block mb-0.5">{col}</label>
+                        <input className="input w-full text-sm" placeholder={col} value={itemManual[col]||''} onChange={e=>setItemManual(p=>({...p,[col]:e.target.value}))}/>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" className="btn-primary text-sm" onClick={()=>{setDbItemsNuevos(p=>[...p,{...itemManual}]);setMostrarFormItem(false);}}>Agregar</button>
+                    <button type="button" className="btn-secondary text-sm" onClick={()=>setMostrarFormItem(false)}>Cancelar</button>
+                  </div>
+                </div>
+              )}
+              {dbItemsNuevos.length>0&&(
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  <div className="bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 border-b">Vista previa — {dbItemsNuevos.length} ítems</div>
+                  <div className="overflow-x-auto max-h-40">
+                    <table className="w-full text-xs">
+                      <thead><tr className="bg-slate-100">
+                        {dbColumnas.map(col=><th key={col} className="text-left px-3 py-2 font-medium text-slate-600">{col}</th>)}
+                        <th className="px-2 py-2"></th>
+                      </tr></thead>
+                      <tbody>
+                        {dbItemsNuevos.slice(0,8).map((item,i)=>(
+                          <tr key={i} className="border-t border-slate-100">
+                            {dbColumnas.map(col=><td key={col} className="px-3 py-1.5 text-slate-700">{item[col]||'—'}</td>)}
+                            <td className="px-2 py-1.5"><button type="button" className="text-rose-400 text-xs" onClick={()=>setDbItemsNuevos(p=>p.filter((_,idx)=>idx!==i))}>✕</button></td>
+                          </tr>
+                        ))}
+                        {dbItemsNuevos.length>8&&<tr><td colSpan={dbColumnas.length+1} className="px-3 py-2 text-slate-400 text-center italic">... y {dbItemsNuevos.length-8} ítems más</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       <button className="btn-primary" disabled={busy||!form.actividad_id} onClick={save}>{busy?'Guardando…':'💾 Guardar configuración'}</button>
+
+      {(()=>{
+        const cfg=configActs.find(c=>c.actividad_id===form.actividad_id);
+        if(!cfg) return null;
+        return(
+          <div className="border border-indigo-200 rounded-lg p-4 bg-indigo-50 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-sm text-indigo-800">🗂️ Base de datos de ítems</span>
+              {!showDbPanel&&<button className="text-xs text-indigo-600 underline" onClick={()=>loadItemDb(cfg.id)}>Configurar</button>}
+            </div>
+            {cfg.tiene_items_unicos&&!showDbPanel&&<p className="text-xs text-emerald-700">✅ Esta actividad tiene base de datos configurada. ({dbItems.length} ítems cargados)</p>}
+            {showDbPanel&&(
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div><label className="label">Nombre de la base</label><input className="input" value={dbForm.nombre} onChange={e=>setDbForm(f=>({...f,nombre:e.target.value}))} placeholder="Inventario de árboles BSL8"/></div>
+                  <div><label className="label">Tipo de bloqueo</label>
+                    <select className="select" value={dbForm.bloqueo_tipo} onChange={e=>setDbForm(f=>({...f,bloqueo_tipo:e.target.value as 'permanente'|'temporal'}))}>
+                      <option value="permanente">Permanente (se bloquea para siempre)</option>
+                      <option value="temporal">Temporal (se bloquea solo el día que se usa)</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="label">Columnas de la base de datos</label>
+                  <div className="space-y-1.5">
+                    {dbForm.columnas.map((col,ci)=>(
+                      <div key={ci} className="flex gap-2 items-center">
+                        <input className="input flex-1" value={col.nombre} onChange={e=>setDbForm(f=>({...f,columnas:f.columnas.map((c2,k)=>k===ci?{...c2,nombre:e.target.value}:c2)}))} placeholder="Nombre columna"/>
+                        <select className="select w-28" value={col.tipo} onChange={e=>setDbForm(f=>({...f,columnas:f.columnas.map((c2,k)=>k===ci?{...c2,tipo:e.target.value}:c2)}))}>
+                          <option value="text">Texto</option><option value="number">Número</option>
+                        </select>
+                        {dbForm.columnas.length>1&&<button className="text-rose-500 text-xs px-2" onClick={()=>setDbForm(f=>({...f,columnas:f.columnas.filter((_,k)=>k!==ci)}))}>✕</button>}
+                      </div>
+                    ))}
+                    <button className="btn-secondary text-xs" onClick={()=>setDbForm(f=>({...f,columnas:[...f.columnas,{nombre:'',tipo:'text'}]}))}>+ Columna</button>
+                  </div>
+                </div>
+                <div className="flex gap-2 flex-wrap items-center">
+                  <button className="btn-primary text-sm" disabled={dbBusy} onClick={()=>saveItemDb(cfg.id)}>{dbBusy?'Guardando…':'💾 Guardar base de datos'}</button>
+                  <label className="btn-secondary text-sm cursor-pointer">
+                    📥 Cargar ítems desde Excel
+                    <input type="file" accept=".xlsx,.xls" className="hidden" onChange={e=>{if(e.target.files?.[0]) uploadItemsExcel(cfg.id,e.target.files[0]);}}/>
+                  </label>
+                </div>
+                {existingDb&&<p className="text-xs text-slate-500">Base existente: <strong>{existingDb.nombre}</strong> · {dbItems.length} ítems precargados (muestra). Bloqueo: {existingDb.bloqueo_tipo}.</p>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {configActs.length>0&&(
         <div>
@@ -2066,19 +3590,36 @@ function ConfigActModule({configActs,catalogs,onRefresh,showToast}:{
             {configActs.map((c,i)=>{
               const actRow=allActs.find(e=>e.id===c.actividad_id);
               return(
-                <div key={i} className="flex items-center gap-2 p-3 rounded-lg border border-slate-200 bg-white">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm truncate text-[#003b7a]">{actRow?.actividad_es||'—'}</div>
-                    <div className="text-xs text-slate-500">{actRow?.especialidad_es||'—'}</div>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      {c.tipo==='D'?'Cualitativa':c.tipo==='A'&&c.meta_total?`Meta: ${c.meta_total} ${c.unidad_es}`:c.tipo==='B'?`Acumulativo · ${c.unidad_es}`:`Tipo ${c.tipo} · ${c.unidad_es}`}
+                <div key={i} className="rounded-lg border border-slate-200 bg-white">
+                  <div className="flex items-center gap-2 p-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm truncate text-[#003b7a]">{actRow?.actividad_es||'—'}</div>
+                      <div className="text-xs text-slate-500">{actRow?.especialidad_es||'—'}</div>
+                      <div className="text-xs text-slate-400 mt-0.5">
+                        {c.tipo==='D'?'Cualitativa':c.tipo==='A'&&c.meta_total?`Meta: ${c.meta_total} ${c.unidad_es}`:c.tipo==='B'?`Acumulativo · ${c.unidad_es}`:`Tipo ${c.tipo} · ${c.unidad_es}`}
+                      </div>
+                    </div>
+                    <span className={`badge flex-shrink-0 ${c.tipo==='A'?'bg-blue-100 text-blue-800':c.tipo==='B'?'bg-green-100 text-green-800':c.tipo==='C'?'bg-purple-100 text-purple-800':'bg-rose-100 text-rose-800'}`}>{c.tipo}</span>
+                    <div className="flex gap-1 flex-shrink-0">
+                      {c.tipo!=='D'&&<button className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" onClick={()=>{setAjusteFor(ajusteFor===c.actividad_id?null:c.actividad_id);setAjusteForm({fecha:today(),cantidad:'',motivo:''});}}>⚖️ Ajustar</button>}
+                      <button className="text-xs px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" onClick={()=>{const e=allActs.find(x=>x.id===c.actividad_id);if(e){const espRow=allActs.find(x=>x.especialidad_es===e.especialidad_es);setForm({...form,especialidad_id:espRow?.id||'',actividad_id:c.actividad_id});selAct(c.actividad_id);}}} >Editar</button>
+                      <button className="text-xs px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={()=>eliminarConfig(c.actividad_id)}>Eliminar</button>
                     </div>
                   </div>
-                  <span className={`badge flex-shrink-0 ${c.tipo==='A'?'bg-blue-100 text-blue-800':c.tipo==='B'?'bg-green-100 text-green-800':c.tipo==='C'?'bg-purple-100 text-purple-800':'bg-rose-100 text-rose-800'}`}>{c.tipo}</span>
-                  <div className="flex gap-1 flex-shrink-0">
-                    <button className="text-xs px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" onClick={()=>{const e=allActs.find(x=>x.id===c.actividad_id);if(e){const espRow=allActs.find(x=>x.especialidad_es===e.especialidad_es);setForm({...form,especialidad_id:espRow?.id||'',actividad_id:c.actividad_id});selAct(c.actividad_id);}}} >Editar</button>
-                    <button className="text-xs px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={()=>eliminarConfig(c.actividad_id)}>Eliminar</button>
-                  </div>
+                  {ajusteFor===c.actividad_id&&(
+                    <div className="border-t border-slate-100 p-3 bg-slate-50 space-y-2">
+                      <p className="text-xs text-slate-500">Registra una corrección al acumulado de <strong>{actRow?.actividad_es}</strong>. Queda como un movimiento auditable (fecha, cantidad y motivo) — no se sobrescribe nada, se suma o resta al histórico.</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div><label className="label">Fecha del ajuste</label><input type="date" className="input" value={ajusteForm.fecha} onChange={e=>setAjusteForm(f=>({...f,fecha:e.target.value}))}/></div>
+                        <div><label className="label">Cantidad ({c.unidad_es}) — negativa para restar</label><input type="number" className="input" value={ajusteForm.cantidad} onChange={e=>setAjusteForm(f=>({...f,cantidad:e.target.value}))} placeholder="Ej: 250 o -80"/></div>
+                        <div className="sm:col-span-1"><label className="label">Motivo</label><input className="input" value={ajusteForm.motivo} onChange={e=>setAjusteForm(f=>({...f,motivo:e.target.value}))} placeholder="Ej: reportes en papel de junio no digitalizados"/></div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button className="btn-primary text-xs" disabled={ajusteBusy} onClick={()=>guardarAjuste(c)}>{ajusteBusy?'Guardando…':'💾 Guardar ajuste'}</button>
+                        <button className="btn-secondary text-xs" onClick={()=>setAjusteFor(null)}>Cancelar</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2167,18 +3708,35 @@ function UsuariosModule({showToast}:{showToast:(k:'ok'|'err'|'info',m:string)=>v
       {loading?<div className="text-sm text-slate-500 text-center py-4">Cargando usuarios…</div>:(
         <div className="space-y-2">
           {filtered.map(u=>(
-            <div key={u.id} className={`flex items-center gap-2 p-2 rounded-lg border ${!u.activo?'bg-slate-50 border-slate-200 opacity-60':'bg-white border-slate-200'}`}>
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm truncate">{u.nombre}</div>
-                <div className="text-xs text-slate-500 truncate">{u.correo}</div>
+            <div key={u.id} className="border border-slate-200 rounded-xl p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0 ${u.activo?'bg-[#003b7a]':'bg-slate-400'}`}>
+                  {u.nombre?.charAt(0)?.toUpperCase()||'?'}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm text-[#003b7a]">{u.nombre||'Sin nombre'}</div>
+                  <div className="text-xs text-slate-500">{u.correo}</div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className={`text-xs font-bold uppercase px-2 py-0.5 rounded-full ${
+                      u.rol==='admin'?'bg-red-100 text-red-700':
+                      u.rol==='lider'?'bg-purple-100 text-purple-700':
+                      u.rol==='tecnico'?'bg-blue-100 text-blue-700':
+                      u.rol==='gerencia'?'bg-amber-100 text-amber-700':
+                      u.rol==='cliente'?'bg-green-100 text-green-700':
+                      'bg-slate-100 text-slate-600'
+                    }`}>{u.rol}</span>
+                    {!u.activo&&<span className="text-xs text-rose-500 font-medium">● Inactivo</span>}
+                  </div>
+                </div>
               </div>
-              <span className="badge bg-slate-100 text-slate-700 uppercase text-xs flex-shrink-0">{u.rol}</span>
-              <select className="select text-xs w-28 flex-shrink-0" value={u.rol} onChange={e=>cambiarRol(u,e.target.value)}>
-                {ROLES.map(r=><option key={r} value={r}>{r}</option>)}
-              </select>
-              <div className="flex gap-1 flex-shrink-0">
-                <button className={`text-xs px-2 py-1 rounded font-medium transition-colors ${u.activo?'bg-amber-100 text-amber-700 hover:bg-amber-200':'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`} onClick={()=>toggleActivo(u)}>{u.activo?'Desactivar':'Activar'}</button>
-                <button className="text-xs px-2 py-1 rounded font-medium bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={()=>eliminar(u)} disabled={busy}>Eliminar</button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <select className="select text-xs" value={u.rol} onChange={e=>cambiarRol(u,e.target.value)}>
+                  {ROLES.map(r=><option key={r} value={r}>{r}</option>)}
+                </select>
+                <button className={`text-xs px-3 py-1.5 rounded-lg font-medium ${u.activo?'bg-amber-100 text-amber-700 hover:bg-amber-200':'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`} onClick={()=>toggleActivo(u)}>
+                  {u.activo?'Desactivar':'Activar'}
+                </button>
+                <button className="text-xs px-3 py-1.5 rounded-lg font-medium bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={()=>eliminar(u)} disabled={busy}>Eliminar</button>
               </div>
             </div>
           ))}
