@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 // Powerchina PDS 360 v2.2
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { supabase, type Profile, type UserRole } from '@/lib/supabase';
 import * as XLSX from 'xlsx';
 
@@ -65,7 +65,6 @@ function resumenPorActividad(avances:Record<string,unknown>[], configActs:Config
   Object.values(porAct).forEach(a=>{if(a.meta)a.pct=Math.min(100,Math.round(a.acumuladoHistorico/a.meta*100));});
   return porAct;
 }
-function toggle(arr:string[],setArr:(v:string[])=>void,val:string){setArr(arr.includes(val)?arr.filter(x=>x!==val):[...arr,val]);}
 function horasLost(ss:SuspItem[]):number {
   return ss.reduce((a,s)=>{
     if(!s.hora_inicio||!s.hora_fin) return a;
@@ -356,6 +355,45 @@ function HomeScreen({user,setView,notifs}:{user:Profile;setView:(v:AppView)=>voi
 }
 function QBtn({icon,label,onClick}:{icon:string;label:string;onClick:()=>void}){
   return <button onClick={onClick} className="card p-3 text-center hover:shadow-md transition-shadow"><div className="text-2xl">{icon}</div><div className="text-xs font-medium text-slate-700 mt-1">{label}</div></button>;
+}
+
+// ── SELECTOR MÚLTIPLE DESPLEGABLE (checklist) ──────────────────────
+function MultiSelectDropdown<T extends {id:string}>({label,options,selected,onChange,renderRow,placeholder='Todas'}:{
+  label:string; options:T[]; selected:string[]; onChange:(v:string[])=>void;
+  renderRow:(opt:T)=>ReactNode; placeholder?:string;
+}){
+  const[open,setOpen]=useState(false);
+  const ref=useRef<HTMLDivElement>(null);
+  useEffect(()=>{
+    function onDoc(e:MouseEvent){ if(ref.current&&!ref.current.contains(e.target as Node)) setOpen(false); }
+    document.addEventListener('mousedown',onDoc);
+    return ()=>document.removeEventListener('mousedown',onDoc);
+  },[]);
+  function toggleOne(id:string){ onChange(selected.includes(id)?selected.filter(x=>x!==id):[...selected,id]); }
+  return(
+    <div className="relative" ref={ref}>
+      <label className="label">{label}</label>
+      <button type="button" onClick={()=>setOpen(o=>!o)} className="select w-full text-left flex items-center justify-between gap-2">
+        <span className="truncate">{selected.length?`${selected.length} seleccionada(s)`:placeholder}</span>
+        <span className="text-slate-400 flex-shrink-0">{open?'▲':'▼'}</span>
+      </button>
+      {open&&(
+        <div className="absolute z-20 mt-1 w-full min-w-[260px] bg-white border border-slate-300 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+          <div className="flex justify-between px-3 py-2 border-b border-slate-100 sticky top-0 bg-white">
+            <button type="button" className="text-xs text-blue-600 hover:underline" onClick={()=>onChange(options.map(o=>o.id))}>Todas</button>
+            <button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>onChange([])}>Ninguna</button>
+          </div>
+          {options.length===0&&<div className="px-3 py-2 text-xs text-slate-400">Sin opciones</div>}
+          {options.map(opt=>(
+            <label key={opt.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-50 last:border-0">
+              <input type="checkbox" checked={selected.includes(opt.id)} onChange={()=>toggleOne(opt.id)}/>
+              <span className="flex-1 min-w-0">{renderRow(opt)}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── PLANEACIÓN ────────────────────────────────────────────────────
@@ -1990,7 +2028,7 @@ function SolicitudesModule({user,catalogs,showToast}:{user:Profile;catalogs:Cata
 function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null;configActs:ConfigAct[];showToast:(k:'ok'|'err'|'info',m:string)=>void}){
   const[fechaIni,setFechaIni]=useState(new Date(Date.now()-7*86400000).toISOString().split('T')[0]);
   const[fechaFin,setFechaFin]=useState(today());
-  const[espId,setEspId]=useState('');
+  const[espIds,setEspIds]=useState<string[]>([]);
   const[actIds,setActIds]=useState<string[]>([]);
   const[incluirPersonal,setIncluirPersonal]=useState(false);
   const[incluirMaquinaria,setIncluirMaquinaria]=useState(false);
@@ -1999,16 +2037,16 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
   const actList=useMemo(()=>{
     if(!catalogs) return [];
-    if(!espId) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
-    const nom=(espList.find(e=>e.id===espId)?.especialidad_es||'').toLowerCase();
-    return catalogs.especialidades_actividades.filter(a=>a.activo!==false&&(a.especialidad_es||'').toLowerCase()===nom);
-  },[catalogs,espId,espList]);
+    if(!espIds.length) return catalogs.especialidades_actividades.filter(a=>a.activo!==false);
+    const nombres=new Set(espIds.map(id=>espList.find(e=>e.id===id)?.especialidad_es?.toLowerCase()).filter(Boolean));
+    return catalogs.especialidades_actividades.filter(a=>a.activo!==false&&nombres.has((a.especialidad_es||'').toLowerCase()));
+  },[catalogs,espIds,espList]);
 
   async function load(){
     setLoading(true);
     try{
       let qR=supabase.from('reportes_avance').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin);
-      if(espId) qR=qR.eq('especialidad_id',espId);
+      if(espIds.length) qR=qR.in('especialidad_id',espIds);
       const[reps,incid,maqD]=await Promise.all([
         qR,
         supabase.from('incidentes_seg').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin).neq('tipo','sin_novedad'),
@@ -2055,7 +2093,8 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
     if(!catalogs||!data) return [];
     const avPorAct=data.avance_por_actividad as Record<string,number>;
     return configActs
-      .filter(c=>!espId||(catalogs.especialidades_actividades.find(e=>e.id===c.actividad_id)?.especialidad_es||'').toLowerCase()===(espList.find(e=>e.id===espId)?.especialidad_es||'').toLowerCase())
+      .filter(c=>!espIds.length||espIds.some(id=>{const e=espList.find(x=>x.id===id);return e&&(catalogs.especialidades_actividades.find(x=>x.id===c.actividad_id)?.especialidad_es||'').toLowerCase()===e.especialidad_es.toLowerCase();}))
+      .filter(c=>!actIds.length||actIds.includes(c.actividad_id))
       .map(c=>{
         const actRow=catalogs.especialidades_actividades.find(e=>e.id===c.actividad_id);
         const avanceHoy=avPorAct[c.actividad_id]||0;
@@ -2064,7 +2103,7 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
         const pct=c.meta_total&&c.tiene_meta?Math.min(100,Math.round(total/c.meta_total*100)):null;
         return{...c,actividad_nombre:actRow?.actividad_es||c.actividad_id,avance_periodo:avanceHoy,total_acumulado:total,pct};
       });
-  },[catalogs,configActs,data,espId,espList]);
+  },[catalogs,configActs,data,espIds,actIds,espList]);
 
   return(
     <div className="space-y-4">
@@ -2072,10 +2111,12 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
         <div className="flex gap-3 items-end flex-wrap">
           <div className="flex-1 min-w-[130px]"><label className="label">Desde</label><input type="date" className="input" value={fechaIni} onChange={e=>setFechaIni(e.target.value)}/></div>
           <div className="flex-1 min-w-[130px]"><label className="label">Hasta</label><input type="date" className="input" value={fechaFin} onChange={e=>setFechaFin(e.target.value)}/></div>
-          <div className="flex-1 min-w-[160px]"><label className="label">Especialidad</label><select className="select" value={espId} onChange={e=>{setEspId(e.target.value);setActIds([]);}}><option value="">Todas</option>{espList.map(e=><option key={e.id} value={e.id}>{e.especialidad_es}</option>)}</select></div>
           <button className="btn-primary" onClick={load} disabled={loading}>{loading?'Cargando…':'Actualizar'}</button>
         </div>
-        <div><div className="flex items-center justify-between mb-1"><label className="label">Actividades</label><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setActIds([])}>Ninguna (todas automático)</button></div><div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">{actList.map(a=><button key={a.id} onClick={()=>toggle(actIds,setActIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${actIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.actividad_es}</button>)}</div></div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <MultiSelectDropdown label="Especialidades" options={espList} selected={espIds} onChange={v=>{setEspIds(v);setActIds([]);}} renderRow={e=><span>{e.especialidad_es}</span>} placeholder="Todas las especialidades"/>
+          <MultiSelectDropdown label="Actividades" options={actList} selected={actIds} onChange={setActIds} renderRow={a=><span className="grid grid-cols-2 gap-2"><span className="text-xs text-slate-400 truncate">{a.especialidad_es}</span><span className="font-medium truncate">{a.actividad_es}</span></span>} placeholder="Todas las actividades"/>
+        </div>
         <div className="flex items-center gap-4 flex-wrap">
           <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirPersonal} onChange={e=>setIncluirPersonal(e.target.checked)}/> Incluir personal/asistencia</label>
           <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirMaquinaria} onChange={e=>setIncluirMaquinaria(e.target.checked)}/> Incluir maquinaria</label>
@@ -2559,9 +2600,11 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
           <div><label className="label">Hasta</label><input type="date" className="input" value={fechaFin} onChange={e=>setFechaFin(e.target.value)}/></div>
           <button className="btn-primary" onClick={fetchData} disabled={loading}>{loading?'Cargando…':'Consultar'}</button>
         </div>
-        <div><div className="flex items-center justify-between mb-1"><label className="label">Especialidades</label><div className="flex gap-3"><button type="button" className="text-xs text-blue-600 hover:underline" onClick={()=>setEspIds(espList.map(e=>e.id))}>Seleccionar todas</button><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setEspIds([])}>Ninguna (todas automático)</button></div></div><div className="flex flex-wrap gap-2">{espList.map(e=><button key={e.id} onClick={()=>toggle(espIds,setEspIds,e.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${espIds.includes(e.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{e.especialidad_es}</button>)}</div>{espIds.length===0&&<div className="text-xs text-slate-400 italic mt-1">Sin selección = se incluyen todas las especialidades</div>}</div>
-        <div><label className="label">Áreas</label><div className="flex flex-wrap gap-2">{(catalogs?.areas||[]).map(a=><button key={a.id} onClick={()=>toggle(areaIds,setAreaIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${areaIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.area_es}</button>)}</div></div>
-        <div><div className="flex items-center justify-between mb-1"><label className="label">Actividades</label><button type="button" className="text-xs text-slate-500 hover:underline" onClick={()=>setActIds([])}>Ninguna (todas automático)</button></div><div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">{actList.map(a=><button key={a.id} onClick={()=>toggle(actIds,setActIds,a.id)} className={`text-xs px-2 py-1 rounded border transition-colors ${actIds.includes(a.id)?'bg-[#003b7a] text-white border-[#003b7a]':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>{a.actividad_es}</button>)}</div>{actIds.length===0&&<div className="text-xs text-slate-400 italic mt-1">Sin selección = se incluyen todas las actividades</div>}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <MultiSelectDropdown label="Especialidades" options={espList} selected={espIds} onChange={setEspIds} renderRow={e=><span>{e.especialidad_es}</span>} placeholder="Todas las especialidades"/>
+          <MultiSelectDropdown label="Áreas" options={catalogs?.areas||[]} selected={areaIds} onChange={setAreaIds} renderRow={a=><span>{a.area_es}</span>} placeholder="Todas las áreas"/>
+          <MultiSelectDropdown label="Actividades" options={actList} selected={actIds} onChange={setActIds} renderRow={a=><span className="grid grid-cols-2 gap-2"><span className="text-xs text-slate-400 truncate">{a.especialidad_es}</span><span className="font-medium truncate">{a.actividad_es}</span></span>} placeholder="Todas las actividades"/>
+        </div>
         <div className="flex items-center gap-4 flex-wrap">
           <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirPersonal} onChange={e=>setIncluirPersonal(e.target.checked)}/> Incluir personal/asistencia</label>
           <label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={incluirMaquinaria} onChange={e=>setIncluirMaquinaria(e.target.checked)}/> Incluir maquinaria</label>
