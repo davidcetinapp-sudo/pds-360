@@ -1,7 +1,7 @@
 // Powerchina PDS 360 — Service Worker v2.0
 // Offline-first: guarda en cache, sincroniza cuando hay red
 
-const CACHE_NAME   = 'pds360-v2';
+const CACHE_NAME   = 'pds360-v3';
 const QUEUE_KEY    = 'pds360-offline-queue';
 const STATIC_URLS  = ['/', '/icons/icon-192.png', '/icons/icon-512.png', '/manifest.json'];
 
@@ -33,7 +33,21 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Recursos estáticos: Cache-first
+  // Documento HTML / navegación: Network-first, para no quedar pegado en una versión vieja tras un deploy
+  if (e.request.mode === 'navigate' || e.request.destination === 'document') {
+    e.respondWith(
+      fetch(e.request).then(res => {
+        if (res && res.status === 200) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
+        }
+        return res;
+      }).catch(() => caches.match(e.request).then(cached => cached || new Response('Sin conexión', { status: 503 })))
+    );
+    return;
+  }
+
+  // Resto de recursos estáticos (JS/CSS con hash de build, imágenes): Cache-first
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;
