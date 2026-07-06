@@ -86,24 +86,33 @@ async function capturarGraficaComoPng(actividadId:string):Promise<string|null>{
     const clone=svg.cloneNode(true) as SVGSVGElement;
     const rect=svg.getBoundingClientRect();
     const w=Math.round(rect.width)||600, h=Math.round(rect.height)||220;
+    if(w<10||h<10) return null;
     clone.setAttribute('width',String(w));
     clone.setAttribute('height',String(h));
     clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+    clone.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+    // Quitar elementos que no sirven en una imagen estática y pueden romper el render (tooltips/cursores activos)
+    clone.querySelectorAll('.recharts-tooltip-cursor, .recharts-active-dot').forEach(el=>el.remove());
     const svgStr=new XMLSerializer().serializeToString(clone);
     const svgB64='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svgStr)));
     return await new Promise((resolve)=>{
+      const timeout=setTimeout(()=>resolve(null),4000);
       const img=new Image();
       img.onload=()=>{
-        const canvas=document.createElement('canvas');
-        canvas.width=w*2; canvas.height=h*2;
-        const ctx=canvas.getContext('2d');
-        if(!ctx){resolve(null);return;}
-        ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-        ctx.scale(2,2);
-        ctx.drawImage(img,0,0,w,h);
-        resolve(canvas.toDataURL('image/png'));
+        try{
+          const canvas=document.createElement('canvas');
+          canvas.width=w*2; canvas.height=h*2;
+          const ctx=canvas.getContext('2d');
+          if(!ctx){clearTimeout(timeout);resolve(null);return;}
+          ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.scale(2,2);
+          ctx.drawImage(img,0,0,w,h);
+          const png=canvas.toDataURL('image/png');
+          clearTimeout(timeout);
+          resolve(png);
+        }catch{ clearTimeout(timeout); resolve(null); }
       };
-      img.onerror=()=>resolve(null);
+      img.onerror=()=>{ clearTimeout(timeout); resolve(null); };
       img.src=svgB64;
     });
   }catch{ return null; }
@@ -2772,14 +2781,15 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}`;
 
     const gruposHTML=Object.entries(porEsp).map(([espNom,items])=>{
-      // Resumen por actividad — total del rango seleccionado (siempre incluido)
+      // Actividades A/B/C — tabla resumen + gráfica, una por una (para que el lector asocie cada gráfica a su actividad)
       const porActEsp=resumenPorActividad(items.avances,configActs,catalogs);
-      const resumenHTML=Object.keys(porActEsp).length?`<div class="sec-tit">📊 Resumen del período</div><table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody>${Object.values(porActEsp).map(a=>`<tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr>`).join('')}</tbody></table>`:'';
-
-      // Gráficas por actividad configuradas en Config. Act.
-      const idsActEsp=new Set(items.avances.map(av=>av.actividad_id as string));
-      const graficasEsp=graficasParaCapturar.filter(c=>idsActEsp.has(c.actividad_id)&&imagenesGraficas[c.actividad_id]);
-      const graficasHTML=graficasEsp.length?`<div class="sec-tit">📈 Gráficas</div>${graficasEsp.map(c=>`<div class="chart-block"><div class="chart-tit">${c.actividad_nombre}</div><img src="${imagenesGraficas[c.actividad_id]}" class="chart-img"/></div>`).join('')}`:'';
+      const actividadesHTML=Object.entries(porActEsp).map(([actId,a])=>{
+        const tablaHTML=`<table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody><tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr></tbody></table>`;
+        const img=imagenesGraficas[actId];
+        const imgHTML=img?`<img src="${img}" class="chart-img"/>`:'';
+        return `<div class="chart-block">${tablaHTML}${imgHTML}</div>`;
+      }).join('');
+      const resumenHTML=Object.keys(porActEsp).length?`<div class="sec-tit">📊 Actividades</div>${actividadesHTML}`:'';
 
       // Avances por fecha — solo en modo Detallado
       const porFecha:Record<string,Record<string,unknown>[]>={};
@@ -2832,7 +2842,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         return `<div class="maq-row"><strong>${mn}</strong>${m.hora_inicio?` · ${m.hora_inicio as string}–${m.hora_fin as string}`:''}${m.descripcion?` · ${m.descripcion as string}`:''}${m.novedad?` · Novedad: ${m.novedad as string}`:''}</div>`;
       }).join('')}`:'';
 
-      return `<div class="esp-block"><div class="esp-tit">🌿 ${espNom}</div>${resumenHTML}${graficasHTML}${fechasHTML}${cualHTML}${adicHTML}${isCliente?'':personalHTML}${isCliente?'':suspsHTML}${isCliente?'':maqHTML}</div>`;
+      return `<div class="esp-block"><div class="esp-tit">🌿 ${espNom}</div>${resumenHTML}${fechasHTML}${cualHTML}${adicHTML}${isCliente?'':personalHTML}${isCliente?'':suspsHTML}${isCliente?'':maqHTML}</div>`;
     }).join('');
 
     const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Informe PDS 360</title><style>${css}</style></head><body>
@@ -2984,22 +2994,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
               </div>
             </div>
 
-            {/* AVANCE POR ACTIVIDAD — resumen del rango, siempre visible */}
-            {actividadesConGrafica.length>0&&(
-              <div className="card p-4">
-                <h3 className="font-bold text-[#003b7a] mb-3">📊 Avance por actividad — {fechaIni} a {fechaFin}</h3>
-                <div className="space-y-5">
-                  {actividadesConGrafica.map((c,i)=>(
-                    <ActivityChart key={i} c={c} catalogs={catalogs}
-                      rowsRango={((data.avances||[]) as Record<string,unknown>[]).filter(av=>av.actividad_id===c.actividad_id).map(av=>({fecha:av.fecha as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}))}
-                      rowsCompleto={historicoPorAct[c.actividad_id]}
-                      onNecesitoCompleto={cargarHistorico}/>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Vista agrupada por especialidad > fecha — el día a día respeta el modo, personal/maquinaria no */}
+            {/* Vista agrupada por especialidad: actividad (tabla resumen + gráfica) → cualitativas → adicionales → día a día → personal/maquinaria */}
             {(()=>{
               const repsG=data.reportes as Record<string,unknown>[];
               const avG=data.avances as Record<string,unknown>[];
@@ -3046,6 +3041,32 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
                     <div key={espNom} className="card p-4">
                       {/* Cabecera especialidad */}
                       <div className="bg-[#003b7a] text-white px-4 py-2 rounded-lg mb-4 font-bold text-sm">🌿 {espNom}</div>
+
+                      {/* ACTIVIDADES A/B/C — tabla resumen + gráfica, una por una */}
+                      {actividadesConGrafica.filter(c=>items.avances.some(av=>av.actividad_id===c.actividad_id)).map((c,i)=>(
+                        <div key={i} className="mb-5">
+                          <table className="w-full text-xs border-collapse mb-2">
+                            <thead><tr className="bg-slate-50">
+                              <th className="text-left px-3 py-2 font-medium text-slate-500">Actividad</th>
+                              <th className="text-center px-3 py-2 font-medium text-slate-500">Total del rango</th>
+                              <th className="text-center px-3 py-2 font-medium text-slate-500">Acumulado histórico</th>
+                              <th className="text-center px-3 py-2 font-medium text-slate-500">Meta</th>
+                              <th className="text-center px-3 py-2 font-medium text-slate-500">% Avance</th>
+                            </tr></thead>
+                            <tbody><tr className="border-t border-slate-100">
+                              <td className="px-3 py-1.5 font-medium text-[#003b7a]">{c.actividad_nombre}</td>
+                              <td className="px-3 py-1.5 text-center">{c.avance_periodo} {c.unidad_es}</td>
+                              <td className="px-3 py-1.5 text-center">{c.total_acumulado} {c.unidad_es}</td>
+                              <td className="px-3 py-1.5 text-center">{c.meta_total||'—'}</td>
+                              <td className="px-3 py-1.5 text-center font-bold">{c.pct!==null?`${c.pct}%`:'—'}</td>
+                            </tr></tbody>
+                          </table>
+                          <ActivityChart c={c} catalogs={catalogs}
+                            rowsRango={((data.avances||[]) as Record<string,unknown>[]).filter(av=>av.actividad_id===c.actividad_id).map(av=>({fecha:av.fecha as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}))}
+                            rowsCompleto={historicoPorAct[c.actividad_id]}
+                            onNecesitoCompleto={cargarHistorico}/>
+                        </div>
+                      ))}
 
                       {/* AVANCES CUANTITATIVOS agrupados por fecha — solo en modo Detallado */}
                       {modo==='detallado'&&(()=>{
