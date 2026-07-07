@@ -197,6 +197,8 @@ create table if not exists public.actividades_programadas (
   rendimiento_esperado text,
   observacion_es      text,
   observacion_en      text,
+  map_x               numeric,
+  map_y               numeric,
   created_at          timestamptz default now()
 );
 
@@ -262,7 +264,30 @@ create table if not exists public.avance_diario (
   acumulado_total    numeric default 0,
   observacion_es     text,
   observacion_en     text,
+  map_x              numeric,
+  map_y              numeric,
   created_at         timestamptz default now()
+);
+
+-- Actividades adicionales reportadas (no estaban en el catálogo del día)
+create table if not exists public.actividades_adicionales_reporte (
+  id                    uuid primary key default gen_random_uuid(),
+  reporte_id            uuid references public.reportes_avance(id) on delete cascade,
+  catalogo_id           uuid references public.actividades_adicionales_catalogo(id),
+  nombre                text not null,
+  descripcion_ejecutado text not null,
+  fecha                 date not null,
+  map_x                 numeric,
+  map_y                 numeric,
+  created_at            timestamptz default now()
+);
+
+-- Mapa del proyecto (una sola fila con la imagen vigente subida por el admin)
+create table if not exists public.configuracion_mapa (
+  id         int primary key default 1,
+  url        text,
+  updated_at timestamptz default now(),
+  constraint configuracion_mapa_solo_una_fila check (id = 1)
 );
 
 create table if not exists public.ejecucion_items (

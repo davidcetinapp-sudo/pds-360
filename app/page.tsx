@@ -22,10 +22,10 @@ interface Notif    { id:string; titulo:string; mensaje:string; leida:boolean; cr
 interface SuspItem { uid:string; tipo_susp:string; otro_desc:string; hora_inicio:string; hora_fin:string; descripcion:string; }
 interface SuspActividad { uid:string; actividad_id:string; tipo:string; otro_desc:string; parcial:boolean; hora_inicio:string; hora_fin:string; observacion:string; }
 interface AsistItem{ personal_id:string; documento_personal:string; nombre:string; cargo_es:string; asistio:boolean; motivo_ausencia:string; ausencia_parcial:boolean; hora_ausencia_ini:string; hora_ausencia_fin:string; jornada_parcial:boolean; hora_jornada_ini:string; hora_jornada_fin:string; es_adicional?:boolean; }
-interface AreaRep  { uid:string; area_id:string; cantidad:string; }
+interface AreaRep  { uid:string; area_id:string; cantidad:string; map_x?:number|null; map_y?:number|null; }
 interface ActRep   { uid:string; actividad_id:string; areas:AreaRep[]; descripcion_cualitativa:string; observacion_es:string; items_seleccionados:string[]; }
 interface ActAdicCat { id:string; nombre:string; veces_usada:number; }
-interface ActAdicItem { uid:string; nombre:string; descripcion:string; catalogoId:string|null; }
+interface ActAdicItem { uid:string; nombre:string; descripcion:string; catalogoId:string|null; map_x?:number|null; map_y?:number|null; }
 interface PersSel  { personal_id:string; documento_personal:string; }
 interface ActForm  {
   uid:string; especialidad_id:string; actividad_id:string;
@@ -33,6 +33,7 @@ interface ActForm  {
   lider_id:string; maquinaria_ids:string[];
   rendimiento_esperado:string; observacion_es:string; observacion_en:string;
   personal:PersSel[];
+  map_x?:number|null; map_y?:number|null;
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────
@@ -78,8 +79,8 @@ function bucketizeSeries(rows:{fecha:string;cantidad:number}[]){
   let acum=0;
   return Object.entries(porPeriodo).sort(([a],[b])=>a.localeCompare(b)).map(([periodo,cantidad])=>{acum+=cantidad;return{periodo,cantidad,acumulado:acum};});
 }
-async function capturarGraficaComoPng(actividadId:string):Promise<string|null>{
-  const cont=document.getElementById(`activity-chart-${actividadId}`);
+async function capturarElementoComoPng(elementId:string):Promise<string|null>{
+  const cont=document.getElementById(elementId);
   if(!cont) return null;
   try{
     const{toPng}=await import('html-to-image');
@@ -417,6 +418,77 @@ function MultiSelectDropdown<T extends {id:string}>({label,options,selected,onCh
   );
 }
 
+// ── UBICACIÓN EN MAPA ───────────────────────────────────────────────
+function useMapaUrl(){
+  const[url,setUrl]=useState<string|null>(null);
+  const[loaded,setLoaded]=useState(false);
+  useEffect(()=>{
+    supabase.from('configuracion_mapa').select('url').eq('id',1).maybeSingle()
+      .then(({data})=>{ setUrl((data as{url:string|null}|null)?.url||null); setLoaded(true); });
+  },[]);
+  return{url,loaded};
+}
+
+interface MapPoint { x:number; y:number; }
+
+function MapPicker({value,onChange,readOnly=false}:{
+  value:MapPoint|null; onChange:(v:MapPoint|null)=>void; readOnly?:boolean;
+}){
+  const{url,loaded}=useMapaUrl();
+  const[open,setOpen]=useState(false);
+  function handleClick(e:React.MouseEvent<HTMLImageElement>){
+    if(readOnly) return;
+    const rect=(e.target as HTMLImageElement).getBoundingClientRect();
+    const x=Math.max(0,Math.min(100,((e.clientX-rect.left)/rect.width)*100));
+    const y=Math.max(0,Math.min(100,((e.clientY-rect.top)/rect.height)*100));
+    onChange({x,y});
+  }
+  return(
+    <div>
+      <div className="flex items-center gap-2">
+        <button type="button" disabled={readOnly} onClick={()=>setOpen(true)}
+          className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${value?'bg-emerald-50 border-emerald-300 text-emerald-700':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>
+          📍 {value?'Ubicación marcada ✓':'Seleccionar ubicación'}
+        </button>
+        {value&&!readOnly&&<button type="button" onClick={()=>onChange(null)} className="text-xs text-rose-500 hover:underline">Quitar</button>}
+      </div>
+      {open&&(
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={()=>setOpen(false)}>
+          <div className="bg-white rounded-xl p-4 max-w-2xl w-full" onClick={e=>e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-[#003b7a]">📍 Marcar ubicación en el mapa</h3>
+              <button type="button" onClick={()=>setOpen(false)} className="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+            {!loaded&&<p className="text-sm text-slate-500 text-center py-8">Cargando mapa…</p>}
+            {loaded&&!url&&<p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-3 text-center">El admin aún no ha subido el mapa del proyecto (Catálogos → Mapa del proyecto).</p>}
+            {loaded&&url&&(
+              <div className="relative inline-block w-full">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={url} alt="Mapa del proyecto" className="w-full rounded-lg border border-slate-200 cursor-crosshair" onClick={handleClick}/>
+                {value&&<div className="absolute -translate-x-1/2 -translate-y-full text-2xl pointer-events-none" style={{left:`${value.x}%`,top:`${value.y}%`}}>📍</div>}
+              </div>
+            )}
+            <p className="text-xs text-slate-400 mt-2">Haz clic sobre el mapa para marcar el punto. No sirve para sitios fuera del área mostrada.</p>
+            <button type="button" className="btn-primary text-sm mt-3 w-full" onClick={()=>setOpen(false)}>Listo</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MapThumbnail({value,heightPx=150,id}:{value:MapPoint; heightPx?:number; id?:string}){
+  const{url,loaded}=useMapaUrl();
+  if(!loaded||!url) return null;
+  return(
+    <div id={id} className="relative inline-block rounded-lg border border-slate-200 overflow-hidden bg-white" style={{height:heightPx}}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={url} alt="Ubicación" style={{height:heightPx,width:'auto',display:'block'}}/>
+      <div className="absolute -translate-x-1/2 -translate-y-full text-xl pointer-events-none" style={{left:`${value.x}%`,top:`${value.y}%`}}>📍</div>
+    </div>
+  );
+}
+
 // ── PLANEACIÓN ────────────────────────────────────────────────────
 function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
   user:Profile; catalogs:Catalogs|null; maquinaria:Maq[];
@@ -605,6 +677,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
           lider_id:(a.lider_id as string)||'', maquinaria_ids:(a.maquinaria_ids as string[])||[],
           rendimiento_esperado:(a.rendimiento_esperado as string)||'', observacion_es:(a.observacion_es as string)||'',
           observacion_en:(a.observacion_en as string)||'',
+          map_x:(a.map_x as number|null)??null, map_y:(a.map_y as number|null)??null,
           personal:(pa||[])
             .filter((p:Record<string,unknown>)=>p.actividad_programada_id===a.id)
             .map((p:Record<string,unknown>)=>({personal_id:p.personal_id as string,documento_personal:p.documento_personal as string})),
@@ -647,6 +720,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
           area_id:act.area_id, areas_adicionales:act.areas_adicionales,
           lider_id:act.lider_id, maquinaria_ids:act.maquinaria_ids,
           rendimiento_esperado:act.rendimiento_esperado, observacion_es:act.observacion_es, observacion_en:act.observacion_en,
+          map_x:act.map_x??null, map_y:act.map_y??null,
         }).select().single();
         if(ae||!aR) throw new Error(ae?.message||'Error en actividad');
         if(act.personal.length){
@@ -701,8 +775,14 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
     XLSX.writeFile(wb,"Planeacion_"+fecha+".xlsx");
   }
 
-  function imprimirPlan(){
+  async function imprimirPlan(){
     if(!catalogs) return;
+    const imagenesMapas:Record<string,string|null>={};
+    const conMapa=actividades.filter(a=>a.map_x!=null&&a.map_y!=null);
+    if(conMapa.length){
+      showToast('info','Generando mapas para el PDF…');
+      await Promise.all(conMapa.map(async a=>{ imagenesMapas[a.uid]=await capturarElementoComoPng(`activity-plan-map-${a.uid}`); }));
+    }
     const lineas=actividades.map((a,idx)=>{
       const espRow=catalogs.especialidades_actividades.find(e=>e.id===a.especialidad_id);
       const actRow=catalogs.especialidades_actividades.find(e=>e.id===a.actividad_id);
@@ -714,7 +794,9 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
         const p=catalogs.personal.find(x=>x.id===ps.personal_id);
         return "<tr><td>"+(pi+1)+"</td><td>"+(p?.nombre||ps.documento_personal)+"</td><td>"+(p?.documento||ps.documento_personal)+"</td><td>"+(p?.cargo_es||"")+"</td></tr>";
       }).join("");
-      return "<div class=act><div class=act-h>Actividad "+(idx+1)+" — "+(actRow?.actividad_es||a.actividad_id)+"</div><div class=act-b><div class=grid><div class=field><label>Especialidad</label><span>"+(espRow?.especialidad_es||"—")+"</span></div><div class=field><label>Area</label><span>"+(areaRow?.area_es||"—")+"</span></div><div class=field><label>Lider</label><span>"+(liderRow?.nombre||"—")+" · "+(liderRow?.cargo_es||"")+"</span></div>"+(areasAd?"<div class=field><label>Areas adicionales</label><span>"+areasAd+"</span></div>":"")+(maqNombres?"<div class=field><label>Maquinaria</label><span>"+maqNombres+"</span></div>":"")+"</div>"+(a.personal.length?"<table class=pt><thead><tr><th>N</th><th>Nombre</th><th>Documento</th><th>Cargo</th></tr></thead><tbody>"+persRows+"</tbody></table>":"<p style=color:#94a3b8>Sin personal asignado</p>")+"</div></div>";
+      const mapaImg=imagenesMapas[a.uid];
+      const mapaHTML=mapaImg?"<div class=field><label>Ubicación</label><img src='"+mapaImg+"' style='height:110px;border:1px solid #e2e8f0;border-radius:6px;margin-top:2px'/></div>":"";
+      return "<div class=act><div class=act-h>Actividad "+(idx+1)+" — "+(actRow?.actividad_es||a.actividad_id)+"</div><div class=act-b><div class=grid><div class=field><label>Especialidad</label><span>"+(espRow?.especialidad_es||"—")+"</span></div><div class=field><label>Area</label><span>"+(areaRow?.area_es||"—")+"</span></div><div class=field><label>Lider</label><span>"+(liderRow?.nombre||"—")+" · "+(liderRow?.cargo_es||"")+"</span></div>"+(areasAd?"<div class=field><label>Areas adicionales</label><span>"+areasAd+"</span></div>":"")+(maqNombres?"<div class=field><label>Maquinaria</label><span>"+maqNombres+"</span></div>":"")+mapaHTML+"</div>"+(a.personal.length?"<table class=pt><thead><tr><th>N</th><th>Nombre</th><th>Documento</th><th>Cargo</th></tr></thead><tbody>"+persRows+"</tbody></table>":"<p style=color:#94a3b8>Sin personal asignado</p>")+"</div></div>";
     }).join("");
     const css="body{font-family:Arial,sans-serif;font-size:11px;color:#111;margin:20px}.hdr{display:flex;align-items:center;gap:12px;border-bottom:2px solid #003b7a;padding-bottom:10px;margin-bottom:16px}.hdr h1{font-size:16px;color:#003b7a;margin:0}.hdr p{margin:2px 0;font-size:10px;color:#555}.act{border:1px solid #cbd5e1;border-radius:6px;margin-bottom:12px;page-break-inside:avoid;overflow:hidden}.act-h{background:#003b7a;color:white;padding:6px 10px;font-weight:bold;font-size:11px}.act-b{padding:8px 10px}.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px}.field label{font-size:9px;color:#666;display:block;margin-bottom:1px}.field span{font-weight:bold}.pt{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}.pt th{background:#e2e8f0;text-align:left;padding:3px 6px;font-size:9px}.pt td{padding:3px 6px;border-bottom:1px solid #f1f5f9}.ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}";
     const html="<!DOCTYPE html><html lang=es><head><meta charset=UTF-8><title>Planeacion "+fecha+"</title><style>"+css+"</style></head><body><div class=hdr><div><h1>Powerchina PDS 360 Planeacion</h1><p>Fecha: <strong>"+fecha+"</strong> Estado: <strong>"+estado.toUpperCase()+"</strong> Actividades: <strong>"+actividades.length+"</strong> Personal total: <strong>"+actividades.reduce((s,a)=>s+a.personal.length,0)+"</strong></p></div></div>"+lineas+"<div class=ftr>Powerchina PDS 360 Generado: "+new Date().toLocaleString("es-CO")+"</div></body></html>";
@@ -855,6 +937,13 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,otherUsedPer
                 <option value="">— Seleccionar —</option>
                 {(catalogs?.areas||[]).map(a=><option key={a.id} value={a.id}>{a.area_es}</option>)}
               </select>
+            </div>
+            <div><label className="label">Ubicación en mapa (opcional)</label>
+              <MapPicker readOnly={readOnly} value={act.map_x!=null&&act.map_y!=null?{x:act.map_x,y:act.map_y}:null}
+                onChange={v=>onChange({map_x:v?.x??null,map_y:v?.y??null})}/>
+              {act.map_x!=null&&act.map_y!=null&&(
+                <div className="mt-2"><MapThumbnail id={`activity-plan-map-${act.uid}`} value={{x:act.map_x,y:act.map_y}} heightPx={110}/></div>
+              )}
             </div>
           </div>
 
@@ -1161,7 +1250,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
             reporte_id:rid,fecha,usuario_id:user.id,actividad_id:ar.actividad_id,
             especialidad_id:espId,area_id:area.area_id,cantidad,
             unidad:cfg?.unidad_es||'',acumulado_anterior:acumPrev,acumulado_total:acumPrev+cantidad,
-            observacion_es:ar.observacion_es,
+            observacion_es:ar.observacion_es,map_x:area.map_x??null,map_y:area.map_y??null,
           }).select().single();
           if(avErr){ showToast('err','Error guardando avance: '+avErr.message); console.error('avance_diario insert error:',avErr); }
           if(avRow&&!avanceId) avanceId=(avRow as Record<string,unknown>).id as string;
@@ -1184,7 +1273,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
       }
       if(actAdicionales.length>0){
         const{error:adErr}=await supabase.from('actividades_adicionales_reporte').insert(
-          actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha}))
+          actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha,map_x:ad.map_x??null,map_y:ad.map_y??null}))
         );
         if(adErr){ showToast('err','Error guardando adicionales: '+adErr.message); console.error('adicionales insert error:',adErr); }
       }
@@ -1508,6 +1597,11 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
                       <input type="number" className="input" min={0} value={area.cantidad}
                         onChange={e=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,areas:x.areas.map((a2,k)=>k===areai?{...a2,cantidad:e.target.value}:a2)}:x))}/>
                     </div>
+                    <div>
+                      <label className="label">Ubicación</label>
+                      <MapPicker value={area.map_x!=null&&area.map_y!=null?{x:area.map_x,y:area.map_y}:null}
+                        onChange={v=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,areas:x.areas.map((a2,k)=>k===areai?{...a2,map_x:v?.x??null,map_y:v?.y??null}:a2)}:x))}/>
+                    </div>
                     {ar.areas.length>1&&(
                       <button className="btn-ghost text-rose-500 text-xs pb-2"
                         onClick={()=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,areas:x.areas.filter((_,k)=>k!==areai)}:x))}>
@@ -1657,12 +1751,16 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
               </div>
             )}
             {actAdicionales.map((ad,ai)=>(
-              <div key={ad.uid} className="flex items-start justify-between bg-white border border-slate-200 rounded-lg p-3 mb-2">
+              <div key={ad.uid} className="flex items-start justify-between bg-white border border-slate-200 rounded-lg p-3 mb-2 gap-2 flex-wrap">
                 <div>
                   <div className="font-medium text-sm text-[#003b7a]">{ad.nombre}</div>
                   <div className="text-xs text-slate-500 mt-0.5">{ad.descripcion}</div>
                 </div>
-                <button className="text-rose-500 text-xs hover:underline ml-3 shrink-0" onClick={()=>setActAdicionales(a=>a.filter((_,j)=>j!==ai))}>Quitar</button>
+                <div className="flex items-center gap-2">
+                  <MapPicker value={ad.map_x!=null&&ad.map_y!=null?{x:ad.map_x,y:ad.map_y}:null}
+                    onChange={v=>setActAdicionales(arr=>arr.map((x,j)=>j===ai?{...x,map_x:v?.x??null,map_y:v?.y??null}:x))}/>
+                  <button className="text-rose-500 text-xs hover:underline shrink-0" onClick={()=>setActAdicionales(a=>a.filter((_,j)=>j!==ai))}>Quitar</button>
+                </div>
               </div>
             ))}
             {!actAdicionales.length&&!mostrarFormAdicional&&<div className="text-xs text-slate-400 italic">Sin actividades adicionales este día.</div>}
@@ -2683,9 +2781,22 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     if(!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length){showToast('info','No hay actividades en el período seleccionado');return;}
     const graficasParaCapturar=actividadesConGrafica.filter(c=>(c.tipo_grafica||'ninguna')!=='ninguna');
     const imagenesGraficas:Record<string,string|null>={};
-    if(graficasParaCapturar.length){
+    // Puntos de ubicación en mapa por actividad (independiente del tipo de gráfica)
+    const puntosPorActividad:Record<string,{x:number;y:number}[]>={};
+    ((data.avances||[]) as Record<string,unknown>[]).forEach(av=>{
+      if(av.map_x!=null&&av.map_y!=null){
+        const id=av.actividad_id as string;
+        if(!puntosPorActividad[id]) puntosPorActividad[id]=[];
+        puntosPorActividad[id].push({x:av.map_x as number,y:av.map_y as number});
+      }
+    });
+    const imagenesMapas:Record<string,string|null>={};
+    if(graficasParaCapturar.length||Object.keys(puntosPorActividad).length){
       showToast('info','Generando gráficas para el PDF…');
-      await Promise.all(graficasParaCapturar.map(async c=>{ imagenesGraficas[c.actividad_id]=await capturarGraficaComoPng(c.actividad_id); }));
+      await Promise.all(graficasParaCapturar.map(async c=>{ imagenesGraficas[c.actividad_id]=await capturarElementoComoPng(`activity-chart-${c.actividad_id}`); }));
+      await Promise.all(Object.entries(puntosPorActividad).flatMap(([actId,pts])=>pts.map(async(_,pi)=>{
+        imagenesMapas[`${actId}-${pi}`]=await capturarElementoComoPng(`activity-map-${actId}-${pi}`);
+      })));
     }
     const avances=data.avances as Record<string,unknown>[];
     const cual=((data.cualitativas||[]) as Record<string,unknown>[]);
@@ -2747,6 +2858,8 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     .chart-block{margin-bottom:12px;page-break-inside:avoid}
     .chart-tit{font-weight:700;color:#003b7a;font-size:10px;margin-bottom:4px}
     .chart-img{width:100%;max-width:650px;border:1px solid #e2e8f0;border-radius:6px}
+    .map-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+    .map-img{height:110px;border:1px solid #e2e8f0;border-radius:6px}
     .ftr{text-align:center;font-size:9px;color:#94a3b8;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:8px}`;
 
     const gruposHTML=Object.entries(porEsp).map(([espNom,items])=>{
@@ -2756,7 +2869,9 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         const tablaHTML=`<table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody><tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr></tbody></table>`;
         const img=imagenesGraficas[actId];
         const imgHTML=img?`<img src="${img}" class="chart-img"/>`:'';
-        return `<div class="chart-block">${tablaHTML}${imgHTML}</div>`;
+        const mapaImgs=(puntosPorActividad[actId]||[]).map((_,pi)=>imagenesMapas[`${actId}-${pi}`]).filter(Boolean);
+        const mapaHTML=mapaImgs.length?`<div class="map-row">${mapaImgs.map(m=>`<img src="${m}" class="map-img"/>`).join('')}</div>`:'';
+        return `<div class="chart-block">${tablaHTML}${imgHTML}${mapaHTML}</div>`;
       }).join('');
       const resumenHTML=Object.keys(porActEsp).length?`<div class="sec-tit">📊 Actividades</div>${actividadesHTML}`:'';
 
@@ -3034,6 +3149,19 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
                             rowsRango={((data.avances||[]) as Record<string,unknown>[]).filter(av=>av.actividad_id===c.actividad_id).map(av=>({fecha:av.fecha as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}))}
                             rowsCompleto={historicoPorAct[c.actividad_id]}
                             onNecesitoCompleto={cargarHistorico}/>
+                          {(()=>{
+                            const puntos=((data.avances||[]) as Record<string,unknown>[])
+                              .filter(av=>av.actividad_id===c.actividad_id&&av.map_x!=null&&av.map_y!=null)
+                              .map(av=>({x:av.map_x as number,y:av.map_y as number}));
+                            if(!puntos.length) return null;
+                            return(
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {puntos.map((p,pi)=>(
+                                  <MapThumbnail key={pi} id={`activity-map-${c.actividad_id}-${pi}`} value={p} heightPx={130}/>
+                                ))}
+                              </div>
+                            );
+                          })()}
                         </div>
                       ))}
 
@@ -3315,6 +3443,46 @@ function CatalogosModule({catalogs,onRefresh,showToast}:{catalogs:Catalogs|null;
         fields={[{n:'nombre',l:'Nombre'},{n:'documento',l:'Documento'},{n:'cargo_es',l:'Cargo (ES)'},{n:'cargo_en',l:'Cargo (EN)'},{n:'tipo',l:'Tipo'},{n:'empresa',l:'Empresa'}]}
         rows={(catalogs?.personal||[]) as unknown as Record<string,unknown>[]} onChanged={onRefresh} showToast={showToast}/>
       <ItemDatabasesSection />
+      <MapaProyectoSection showToast={showToast}/>
+    </div>
+  );
+}
+
+function MapaProyectoSection({showToast}:{showToast:(k:'ok'|'err'|'info',m:string)=>void}){
+  const{url,loaded}=useMapaUrl();
+  const[busy,setBusy]=useState(false);
+
+  async function subirMapa(file:File){
+    setBusy(true);
+    try{
+      const ext=file.name.split('.').pop()||'png';
+      const path=`mapa-${Date.now()}.${ext}`;
+      const{error:upErr}=await supabase.storage.from('mapas').upload(path,file,{upsert:true});
+      if(upErr) throw upErr;
+      const{data:pub}=supabase.storage.from('mapas').getPublicUrl(path);
+      const{error:dbErr}=await supabase.from('configuracion_mapa').update({url:pub.publicUrl,updated_at:new Date().toISOString()}).eq('id',1);
+      if(dbErr) throw dbErr;
+      showToast('ok','Mapa actualizado ✓');
+      window.location.reload();
+    } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error subiendo el mapa'); }
+    finally{ setBusy(false); }
+  }
+
+  return(
+    <div className="card p-4">
+      <h3 className="font-bold text-[#003b7a] mb-2">🗺️ Mapa del proyecto</h3>
+      <p className="text-xs text-slate-500 mb-3">Se usa para marcar la ubicación de actividades en Planeación, Reporte e Informes. Sube una imagen (PNG/JPG) del mapa de circuitos.</p>
+      {loaded&&url&&(
+        <div className="mb-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={url} alt="Mapa actual" className="max-h-60 rounded-lg border border-slate-200"/>
+        </div>
+      )}
+      {loaded&&!url&&<p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-3">Aún no hay un mapa cargado.</p>}
+      <label className="btn-secondary text-sm cursor-pointer inline-block">
+        {busy?'Subiendo…':'📤 Subir / reemplazar mapa'}
+        <input type="file" accept="image/*" className="hidden" disabled={busy} onChange={e=>{const f=e.target.files?.[0];if(f) subirMapa(f);}}/>
+      </label>
     </div>
   );
 }
