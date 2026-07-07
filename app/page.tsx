@@ -22,10 +22,10 @@ interface Notif    { id:string; titulo:string; mensaje:string; leida:boolean; cr
 interface SuspItem { uid:string; tipo_susp:string; otro_desc:string; hora_inicio:string; hora_fin:string; descripcion:string; }
 interface SuspActividad { uid:string; actividad_id:string; tipo:string; otro_desc:string; parcial:boolean; hora_inicio:string; hora_fin:string; observacion:string; }
 interface AsistItem{ personal_id:string; documento_personal:string; nombre:string; cargo_es:string; asistio:boolean; motivo_ausencia:string; ausencia_parcial:boolean; hora_ausencia_ini:string; hora_ausencia_fin:string; jornada_parcial:boolean; hora_jornada_ini:string; hora_jornada_fin:string; es_adicional?:boolean; }
-interface AreaRep  { uid:string; area_id:string; cantidad:string; map_x?:number|null; map_y?:number|null; }
+interface AreaRep  { uid:string; area_id:string; cantidad:string; map_points?:MapPoint[]; }
 interface ActRep   { uid:string; actividad_id:string; areas:AreaRep[]; descripcion_cualitativa:string; observacion_es:string; items_seleccionados:string[]; }
 interface ActAdicCat { id:string; nombre:string; veces_usada:number; }
-interface ActAdicItem { uid:string; nombre:string; descripcion:string; catalogoId:string|null; map_x?:number|null; map_y?:number|null; }
+interface ActAdicItem { uid:string; nombre:string; descripcion:string; catalogoId:string|null; map_points?:MapPoint[]; }
 interface PersSel  { personal_id:string; documento_personal:string; }
 interface ActForm  {
   uid:string; especialidad_id:string; actividad_id:string;
@@ -33,7 +33,7 @@ interface ActForm  {
   lider_id:string; maquinaria_ids:string[];
   rendimiento_esperado:string; observacion_es:string; observacion_en:string;
   personal:PersSel[];
-  map_x?:number|null; map_y?:number|null;
+  map_points?:MapPoint[];
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────
@@ -431,32 +431,42 @@ function useMapaUrl(){
 
 interface MapPoint { x:number; y:number; }
 
+function MapPinBadge({n,size=24}:{n:number;size?:number}){
+  return(
+    <div className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#003b7a] text-white font-bold border-2 border-white shadow flex items-center justify-center pointer-events-none"
+      style={{width:size,height:size,fontSize:size*0.5}}>
+      {n}
+    </div>
+  );
+}
+
 function MapPicker({value,onChange,readOnly=false}:{
-  value:MapPoint|null; onChange:(v:MapPoint|null)=>void; readOnly?:boolean;
+  value:MapPoint[]; onChange:(v:MapPoint[])=>void; readOnly?:boolean;
 }){
   const{url,loaded}=useMapaUrl();
   const[open,setOpen]=useState(false);
   function handleClick(e:React.MouseEvent<HTMLImageElement>){
     if(readOnly) return;
-    const rect=(e.target as HTMLImageElement).getBoundingClientRect();
+    const rect=e.currentTarget.getBoundingClientRect();
     const x=Math.max(0,Math.min(100,((e.clientX-rect.left)/rect.width)*100));
     const y=Math.max(0,Math.min(100,((e.clientY-rect.top)/rect.height)*100));
-    onChange({x,y});
+    onChange([...value,{x,y}]);
   }
+  function quitarPunto(i:number){ onChange(value.filter((_,j)=>j!==i)); }
   return(
     <div>
       <div className="flex items-center gap-2">
         <button type="button" disabled={readOnly} onClick={()=>setOpen(true)}
-          className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${value?'bg-emerald-50 border-emerald-300 text-emerald-700':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>
-          📍 {value?'Ubicación marcada ✓':'Seleccionar ubicación'}
+          className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${value.length?'bg-emerald-50 border-emerald-300 text-emerald-700':'border-slate-300 text-slate-600 hover:border-[#003b7a]'}`}>
+          📍 {value.length?`${value.length} ubicación(es) ✓`:'Seleccionar ubicación(es)'}
         </button>
-        {value&&!readOnly&&<button type="button" onClick={()=>onChange(null)} className="text-xs text-rose-500 hover:underline">Quitar</button>}
+        {value.length>0&&!readOnly&&<button type="button" onClick={()=>onChange([])} className="text-xs text-rose-500 hover:underline">Quitar todas</button>}
       </div>
       {open&&(
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={()=>setOpen(false)}>
-          <div className="bg-white rounded-xl p-4 max-w-2xl w-full" onClick={e=>e.stopPropagation()}>
+          <div className="bg-white rounded-xl p-4 max-w-3xl w-full" onClick={e=>e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-[#003b7a]">📍 Marcar ubicación en el mapa</h3>
+              <h3 className="font-bold text-[#003b7a]">📍 Marcar ubicaciones en el mapa</h3>
               <button type="button" onClick={()=>setOpen(false)} className="text-slate-400 hover:text-slate-700">✕</button>
             </div>
             {!loaded&&<p className="text-sm text-slate-500 text-center py-8">Cargando mapa…</p>}
@@ -465,10 +475,24 @@ function MapPicker({value,onChange,readOnly=false}:{
               <div className="relative inline-block w-full">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={url} alt="Mapa del proyecto" className="w-full rounded-lg border border-slate-200 cursor-crosshair" onClick={handleClick}/>
-                {value&&<div className="absolute -translate-x-1/2 -translate-y-full text-2xl pointer-events-none" style={{left:`${value.x}%`,top:`${value.y}%`}}>📍</div>}
+                {value.map((p,i)=>(
+                  <div key={i} className="absolute" style={{left:`${p.x}%`,top:`${p.y}%`}}>
+                    <MapPinBadge n={i+1} size={26}/>
+                  </div>
+                ))}
               </div>
             )}
-            <p className="text-xs text-slate-400 mt-2">Haz clic sobre el mapa para marcar el punto. No sirve para sitios fuera del área mostrada.</p>
+            {value.length>0&&(
+              <div className="flex flex-wrap gap-2 mt-3">
+                {value.map((_,i)=>(
+                  <span key={i} className="text-xs bg-slate-100 rounded-full px-2 py-1 flex items-center gap-1">
+                    <span className="font-bold text-[#003b7a]">{i+1}</span>
+                    <button type="button" className="text-rose-500" onClick={()=>quitarPunto(i)}>✕</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-slate-400 mt-2">Cada clic agrega un punto numerado en el orden en que se ejecutó. No sirve para sitios fuera del área mostrada.</p>
             <button type="button" className="btn-primary text-sm mt-3 w-full" onClick={()=>setOpen(false)}>Listo</button>
           </div>
         </div>
@@ -477,14 +501,16 @@ function MapPicker({value,onChange,readOnly=false}:{
   );
 }
 
-function MapThumbnail({value,heightPx=150,id}:{value:MapPoint; heightPx?:number; id?:string}){
+function MapThumbnail({value,heightPx=150,id}:{value:MapPoint[]; heightPx?:number; id?:string}){
   const{url,loaded}=useMapaUrl();
-  if(!loaded||!url) return null;
+  if(!loaded||!url||!value.length) return null;
   return(
     <div id={id} className="relative inline-block rounded-lg border border-slate-200 overflow-hidden bg-white" style={{height:heightPx}}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={url} alt="Ubicación" style={{height:heightPx,width:'auto',display:'block'}}/>
-      <div className="absolute -translate-x-1/2 -translate-y-full text-xl pointer-events-none" style={{left:`${value.x}%`,top:`${value.y}%`}}>📍</div>
+      {value.map((p,i)=>(
+        <div key={i} className="absolute" style={{left:`${p.x}%`,top:`${p.y}%`}}><MapPinBadge n={i+1} size={Math.max(16,heightPx*0.13)}/></div>
+      ))}
     </div>
   );
 }
@@ -677,7 +703,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
           lider_id:(a.lider_id as string)||'', maquinaria_ids:(a.maquinaria_ids as string[])||[],
           rendimiento_esperado:(a.rendimiento_esperado as string)||'', observacion_es:(a.observacion_es as string)||'',
           observacion_en:(a.observacion_en as string)||'',
-          map_x:(a.map_x as number|null)??null, map_y:(a.map_y as number|null)??null,
+          map_points:(a.map_points as MapPoint[])||[],
           personal:(pa||[])
             .filter((p:Record<string,unknown>)=>p.actividad_programada_id===a.id)
             .map((p:Record<string,unknown>)=>({personal_id:p.personal_id as string,documento_personal:p.documento_personal as string})),
@@ -720,7 +746,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
           area_id:act.area_id, areas_adicionales:act.areas_adicionales,
           lider_id:act.lider_id, maquinaria_ids:act.maquinaria_ids,
           rendimiento_esperado:act.rendimiento_esperado, observacion_es:act.observacion_es, observacion_en:act.observacion_en,
-          map_x:act.map_x??null, map_y:act.map_y??null,
+          map_points:act.map_points||[],
         }).select().single();
         if(ae||!aR) throw new Error(ae?.message||'Error en actividad');
         if(act.personal.length){
@@ -778,7 +804,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
   async function imprimirPlan(){
     if(!catalogs) return;
     const imagenesMapas:Record<string,string|null>={};
-    const conMapa=actividades.filter(a=>a.map_x!=null&&a.map_y!=null);
+    const conMapa=actividades.filter(a=>a.map_points?.length);
     if(conMapa.length){
       showToast('info','Generando mapas para el PDF…');
       await Promise.all(conMapa.map(async a=>{ imagenesMapas[a.uid]=await capturarElementoComoPng(`activity-plan-map-${a.uid}`); }));
@@ -939,10 +965,10 @@ function ActCard({index,act,catalogs,maquinaria,blockedMap,readOnly,otherUsedPer
               </select>
             </div>
             <div><label className="label">Ubicación en mapa (opcional)</label>
-              <MapPicker readOnly={readOnly} value={act.map_x!=null&&act.map_y!=null?{x:act.map_x,y:act.map_y}:null}
-                onChange={v=>onChange({map_x:v?.x??null,map_y:v?.y??null})}/>
-              {act.map_x!=null&&act.map_y!=null&&(
-                <div className="mt-2"><MapThumbnail id={`activity-plan-map-${act.uid}`} value={{x:act.map_x,y:act.map_y}} heightPx={110}/></div>
+              <MapPicker readOnly={readOnly} value={act.map_points||[]}
+                onChange={v=>onChange({map_points:v})}/>
+              {!!act.map_points?.length&&(
+                <div className="mt-2"><MapThumbnail id={`activity-plan-map-${act.uid}`} value={act.map_points} heightPx={110}/></div>
               )}
             </div>
           </div>
@@ -1250,7 +1276,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
             reporte_id:rid,fecha,usuario_id:user.id,actividad_id:ar.actividad_id,
             especialidad_id:espId,area_id:area.area_id,cantidad,
             unidad:cfg?.unidad_es||'',acumulado_anterior:acumPrev,acumulado_total:acumPrev+cantidad,
-            observacion_es:ar.observacion_es,map_x:area.map_x??null,map_y:area.map_y??null,
+            observacion_es:ar.observacion_es,map_points:area.map_points||[],
           }).select().single();
           if(avErr){ showToast('err','Error guardando avance: '+avErr.message); console.error('avance_diario insert error:',avErr); }
           if(avRow&&!avanceId) avanceId=(avRow as Record<string,unknown>).id as string;
@@ -1273,7 +1299,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
       }
       if(actAdicionales.length>0){
         const{error:adErr}=await supabase.from('actividades_adicionales_reporte').insert(
-          actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha,map_x:ad.map_x??null,map_y:ad.map_y??null}))
+          actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha,map_points:ad.map_points||[]}))
         );
         if(adErr){ showToast('err','Error guardando adicionales: '+adErr.message); console.error('adicionales insert error:',adErr); }
       }
@@ -1599,8 +1625,8 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
                     </div>
                     <div>
                       <label className="label">Ubicación</label>
-                      <MapPicker value={area.map_x!=null&&area.map_y!=null?{x:area.map_x,y:area.map_y}:null}
-                        onChange={v=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,areas:x.areas.map((a2,k)=>k===areai?{...a2,map_x:v?.x??null,map_y:v?.y??null}:a2)}:x))}/>
+                      <MapPicker value={area.map_points||[]}
+                        onChange={v=>setActReps(arr=>arr.map((x,j)=>j===ai?{...x,areas:x.areas.map((a2,k)=>k===areai?{...a2,map_points:v}:a2)}:x))}/>
                     </div>
                     {ar.areas.length>1&&(
                       <button className="btn-ghost text-rose-500 text-xs pb-2"
@@ -1757,8 +1783,8 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
                   <div className="text-xs text-slate-500 mt-0.5">{ad.descripcion}</div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <MapPicker value={ad.map_x!=null&&ad.map_y!=null?{x:ad.map_x,y:ad.map_y}:null}
-                    onChange={v=>setActAdicionales(arr=>arr.map((x,j)=>j===ai?{...x,map_x:v?.x??null,map_y:v?.y??null}:x))}/>
+                  <MapPicker value={ad.map_points||[]}
+                    onChange={v=>setActAdicionales(arr=>arr.map((x,j)=>j===ai?{...x,map_points:v}:x))}/>
                   <button className="text-rose-500 text-xs hover:underline shrink-0" onClick={()=>setActAdicionales(a=>a.filter((_,j)=>j!==ai))}>Quitar</button>
                 </div>
               </div>
@@ -2781,21 +2807,21 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     if(!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length){showToast('info','No hay actividades en el período seleccionado');return;}
     const graficasParaCapturar=actividadesConGrafica.filter(c=>(c.tipo_grafica||'ninguna')!=='ninguna');
     const imagenesGraficas:Record<string,string|null>={};
-    // Puntos de ubicación en mapa por actividad (independiente del tipo de gráfica)
-    const puntosPorActividad:Record<string,{x:number;y:number}[]>={};
+    // Filas con ubicación en mapa por actividad (una tarjeta por fila de avance_diario, con sus propios puntos numerados)
+    const filasMapaPorActividad:Record<string,number>={};
     ((data.avances||[]) as Record<string,unknown>[]).forEach(av=>{
-      if(av.map_x!=null&&av.map_y!=null){
+      const pts=(av.map_points as MapPoint[])||[];
+      if(pts.length){
         const id=av.actividad_id as string;
-        if(!puntosPorActividad[id]) puntosPorActividad[id]=[];
-        puntosPorActividad[id].push({x:av.map_x as number,y:av.map_y as number});
+        filasMapaPorActividad[id]=(filasMapaPorActividad[id]||0)+1;
       }
     });
     const imagenesMapas:Record<string,string|null>={};
-    if(graficasParaCapturar.length||Object.keys(puntosPorActividad).length){
+    if(graficasParaCapturar.length||Object.keys(filasMapaPorActividad).length){
       showToast('info','Generando gráficas para el PDF…');
       await Promise.all(graficasParaCapturar.map(async c=>{ imagenesGraficas[c.actividad_id]=await capturarElementoComoPng(`activity-chart-${c.actividad_id}`); }));
-      await Promise.all(Object.entries(puntosPorActividad).flatMap(([actId,pts])=>pts.map(async(_,pi)=>{
-        imagenesMapas[`${actId}-${pi}`]=await capturarElementoComoPng(`activity-map-${actId}-${pi}`);
+      await Promise.all(Object.entries(filasMapaPorActividad).flatMap(([actId,n])=>Array.from({length:n}).map(async(_,fi)=>{
+        imagenesMapas[`${actId}-${fi}`]=await capturarElementoComoPng(`activity-map-${actId}-${fi}`);
       })));
     }
     const avances=data.avances as Record<string,unknown>[];
@@ -2869,7 +2895,8 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         const tablaHTML=`<table class="tbl"><thead><tr><th>Actividad</th><th>Total rango</th><th>Acumulado histórico</th><th>Meta</th><th>%</th></tr></thead><tbody><tr><td><strong>${a.nombre}</strong></td><td>${a.totalRango} ${a.unidad}</td><td>${a.acumuladoHistorico} ${a.unidad}</td><td>${a.meta||'—'}</td><td>${a.pct!==null?a.pct+'%':'—'}</td></tr></tbody></table>`;
         const img=imagenesGraficas[actId];
         const imgHTML=img?`<img src="${img}" class="chart-img"/>`:'';
-        const mapaImgs=(puntosPorActividad[actId]||[]).map((_,pi)=>imagenesMapas[`${actId}-${pi}`]).filter(Boolean);
+        const filasConMapaEsp=items.avances.filter(av=>av.actividad_id===actId&&((av.map_points as MapPoint[])||[]).length>0);
+        const mapaImgs=filasConMapaEsp.map((_,fi)=>imagenesMapas[`${actId}-${fi}`]).filter(Boolean);
         const mapaHTML=mapaImgs.length?`<div class="map-row">${mapaImgs.map(m=>`<img src="${m}" class="map-img"/>`).join('')}</div>`:'';
         return `<div class="chart-block">${tablaHTML}${imgHTML}${mapaHTML}</div>`;
       }).join('');
@@ -3150,14 +3177,12 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
                             rowsCompleto={historicoPorAct[c.actividad_id]}
                             onNecesitoCompleto={cargarHistorico}/>
                           {(()=>{
-                            const puntos=((data.avances||[]) as Record<string,unknown>[])
-                              .filter(av=>av.actividad_id===c.actividad_id&&av.map_x!=null&&av.map_y!=null)
-                              .map(av=>({x:av.map_x as number,y:av.map_y as number}));
-                            if(!puntos.length) return null;
+                            const filas=items.avances.filter(av=>av.actividad_id===c.actividad_id&&((av.map_points as MapPoint[])||[]).length>0);
+                            if(!filas.length) return null;
                             return(
                               <div className="mt-2 flex flex-wrap gap-2">
-                                {puntos.map((p,pi)=>(
-                                  <MapThumbnail key={pi} id={`activity-map-${c.actividad_id}-${pi}`} value={p} heightPx={130}/>
+                                {filas.map((av,fi)=>(
+                                  <MapThumbnail key={fi} id={`activity-map-${c.actividad_id}-${fi}`} value={(av.map_points as MapPoint[])||[]} heightPx={130}/>
                                 ))}
                               </div>
                             );

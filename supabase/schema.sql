@@ -197,8 +197,7 @@ create table if not exists public.actividades_programadas (
   rendimiento_esperado text,
   observacion_es      text,
   observacion_en      text,
-  map_x               numeric,
-  map_y               numeric,
+  map_points          jsonb not null default '[]',
   created_at          timestamptz default now()
 );
 
@@ -264,8 +263,7 @@ create table if not exists public.avance_diario (
   acumulado_total    numeric default 0,
   observacion_es     text,
   observacion_en     text,
-  map_x              numeric,
-  map_y              numeric,
+  map_points         jsonb not null default '[]',
   created_at         timestamptz default now()
 );
 
@@ -277,8 +275,7 @@ create table if not exists public.actividades_adicionales_reporte (
   nombre                text not null,
   descripcion_ejecutado text not null,
   fecha                 date not null,
-  map_x                 numeric,
-  map_y                 numeric,
+  map_points            jsonb not null default '[]',
   created_at            timestamptz default now()
 );
 
