@@ -80,41 +80,10 @@ function bucketizeSeries(rows:{fecha:string;cantidad:number}[]){
 }
 async function capturarGraficaComoPng(actividadId:string):Promise<string|null>{
   const cont=document.getElementById(`activity-chart-${actividadId}`);
-  const svg=cont?.querySelector('svg');
-  if(!svg) return null;
+  if(!cont) return null;
   try{
-    const clone=svg.cloneNode(true) as SVGSVGElement;
-    const rect=svg.getBoundingClientRect();
-    const w=Math.round(rect.width)||600, h=Math.round(rect.height)||220;
-    if(w<10||h<10) return null;
-    clone.setAttribute('width',String(w));
-    clone.setAttribute('height',String(h));
-    clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
-    clone.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
-    // Quitar elementos que no sirven en una imagen estática y pueden romper el render (tooltips/cursores activos)
-    clone.querySelectorAll('.recharts-tooltip-cursor, .recharts-active-dot').forEach(el=>el.remove());
-    const svgStr=new XMLSerializer().serializeToString(clone);
-    const svgB64='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svgStr)));
-    return await new Promise((resolve)=>{
-      const timeout=setTimeout(()=>resolve(null),4000);
-      const img=new Image();
-      img.onload=()=>{
-        try{
-          const canvas=document.createElement('canvas');
-          canvas.width=w*2; canvas.height=h*2;
-          const ctx=canvas.getContext('2d');
-          if(!ctx){clearTimeout(timeout);resolve(null);return;}
-          ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-          ctx.scale(2,2);
-          ctx.drawImage(img,0,0,w,h);
-          const png=canvas.toDataURL('image/png');
-          clearTimeout(timeout);
-          resolve(png);
-        }catch{ clearTimeout(timeout); resolve(null); }
-      };
-      img.onerror=()=>{ clearTimeout(timeout); resolve(null); };
-      img.src=svgB64;
-    });
+    const{toPng}=await import('html-to-image');
+    return await toPng(cont,{pixelRatio:2,backgroundColor:'#ffffff',cacheBust:true});
   }catch{ return null; }
 }
 function horasLost(ss:SuspItem[]):number {
