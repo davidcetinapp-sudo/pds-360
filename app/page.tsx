@@ -87,6 +87,36 @@ async function capturarElementoComoPng(elementId:string):Promise<string|null>{
     return await toPng(cont,{pixelRatio:2,backgroundColor:'#ffffff',cacheBust:true});
   }catch{ return null; }
 }
+// Dibuja el mapa + puntos numerados directamente en un canvas — no depende de que ya esté
+// renderizado en pantalla, así funciona igual en exportaciones por rango (PDF/Excel) que en
+// el día actual.
+async function generarMapaPng(mapaUrl:string|null,points:{x:number;y:number}[],heightPx=150):Promise<string|null>{
+  if(!mapaUrl||!points.length) return null;
+  try{
+    const img=new Image();
+    img.crossOrigin='anonymous';
+    await new Promise<void>((resolve,reject)=>{ img.onload=()=>resolve(); img.onerror=()=>reject(new Error('img load')); img.src=mapaUrl; });
+    const scale=heightPx/(img.naturalHeight||heightPx);
+    const w=Math.max(1,Math.round((img.naturalWidth||heightPx)*scale)), h=heightPx;
+    const canvas=document.createElement('canvas');
+    canvas.width=w*2; canvas.height=h*2;
+    const ctx=canvas.getContext('2d');
+    if(!ctx) return null;
+    ctx.scale(2,2);
+    ctx.drawImage(img,0,0,w,h);
+    points.forEach((p,i)=>{
+      const cx=w*p.x/100, cy=h*p.y/100;
+      const r=Math.max(7,h*0.06);
+      ctx.beginPath(); ctx.arc(cx,cy,r,0,2*Math.PI);
+      ctx.fillStyle='#003b7a'; ctx.fill();
+      ctx.lineWidth=2; ctx.strokeStyle='#ffffff'; ctx.stroke();
+      ctx.fillStyle='#ffffff'; ctx.font=`bold ${Math.round(r)}px Arial`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(String(i+1),cx,cy+1);
+    });
+    return canvas.toDataURL('image/png');
+  }catch{ return null; }
+}
 function horasLost(ss:SuspItem[]):number {
   return ss.reduce((a,s)=>{
     if(!s.hora_inicio||!s.hora_fin) return a;
@@ -535,6 +565,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
   const[rangeEsps,setRangeEsps]=useState<string[]>([]);
   const[rangeLoading,setRangeLoading]=useState(false);
   const espListRange=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[], [catalogs]);
+  const{url:mapaUrl}=useMapaUrl();
 
   async function fetchRangeData(){
     setRangeLoading(true);
@@ -588,6 +619,12 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
 
   async function exportRangePDF(){
     const d=await fetchRangeData(); if(!d||!catalogs) return;
+    const conMapaRange=d.acts.filter(a=>((a.map_points as MapPoint[])||[]).length>0);
+    const imagenesMapasRange:Record<string,string|null>={};
+    if(conMapaRange.length){
+      showToast('info','Generando mapas para el PDF…');
+      await Promise.all(conMapaRange.map(async a=>{ imagenesMapasRange[a.id as string]=await generarMapaPng(mapaUrl,(a.map_points as MapPoint[])||[],100); }));
+    }
     const css=`
       *{box-sizing:border-box;margin:0;padding:0}
       body{font-family:Arial,sans-serif;font-size:11px;color:#1e293b;padding:20px}
@@ -631,6 +668,8 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
         const areasAdicStr=areasAdic.length?` + ${areasAdic.join(', ')}`: '';
         const maqList=((act.maquinaria_ids as string[])||[]).map(id=>{const mq=maquinaria.find(x=>x.id===id);return mq?(mq.nombre||`${mq.item_id} (${mq.tipo})`):id;});
         const maqHTML=maqList.length?`<div class="maq-row"><label>🚜 Maquinaria:</label>${maqList.join(' · ')}</div>`:'';
+        const mapaImgRange=imagenesMapasRange[act.id as string];
+        const mapaHTML=mapaImgRange?`<div style="margin-bottom:10px"><img src="${mapaImgRange}" style="height:100px;border:1px solid #e2e8f0;border-radius:6px"/></div>`:'';
         const persAct=d.pa.filter(p=>p.actividad_programada_id===act.id as string);
         const personalFilas=persAct.map((p,i)=>{
           const ps=p.personal as Record<string,unknown>;
@@ -651,6 +690,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
                 ${act.observacion_es?`<div class="meta-item wide"><label>Observación</label><span style="font-weight:400">${act.observacion_es as string}</span></div>`:''}
               </div>
               ${maqHTML}
+              ${mapaHTML}
               ${persAct.length?`
               <div class="personal-titulo">👥 Personal asignado</div>
               <table class="personal-table">
@@ -807,7 +847,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
     const conMapa=actividades.filter(a=>a.map_points?.length);
     if(conMapa.length){
       showToast('info','Generando mapas para el PDF…');
-      await Promise.all(conMapa.map(async a=>{ imagenesMapas[a.uid]=await capturarElementoComoPng(`activity-plan-map-${a.uid}`); }));
+      await Promise.all(conMapa.map(async a=>{ imagenesMapas[a.uid]=await generarMapaPng(mapaUrl,a.map_points||[],110); }));
     }
     const lineas=actividades.map((a,idx)=>{
       const espRow=catalogs.especialidades_actividades.find(e=>e.id===a.especialidad_id);
@@ -2726,6 +2766,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
   const[soloAp,setSoloAp]=useState(false);
   const[data,setData]=useState<Record<string,unknown>|null>(null);
   const[loading,setLoading]=useState(false);
+  const{url:mapaUrl}=useMapaUrl();
   const[historicoPorAct,setHistoricoPorAct]=useState<Record<string,{fecha:string;area_id:string;cantidad:number}[]>>({});
   const espList=useMemo(()=>catalogs?uniqueEsp(catalogs.especialidades_actividades):[],[catalogs]);
   function nombreMaquina(id:string){
@@ -2807,22 +2848,15 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
     if(!(data.avances as unknown[]).length&&!((data.cualitativas||[]) as unknown[]).length&&!((data.adicionales||[]) as unknown[]).length){showToast('info','No hay actividades en el período seleccionado');return;}
     const graficasParaCapturar=actividadesConGrafica.filter(c=>(c.tipo_grafica||'ninguna')!=='ninguna');
     const imagenesGraficas:Record<string,string|null>={};
-    // Filas con ubicación en mapa por actividad (una tarjeta por fila de avance_diario, con sus propios puntos numerados)
-    const filasMapaPorActividad:Record<string,number>={};
-    ((data.avances||[]) as Record<string,unknown>[]).forEach(av=>{
-      const pts=(av.map_points as MapPoint[])||[];
-      if(pts.length){
-        const id=av.actividad_id as string;
-        filasMapaPorActividad[id]=(filasMapaPorActividad[id]||0)+1;
-      }
-    });
+    // Filas con ubicación en mapa (dibujadas directamente en canvas, no dependen de lo que esté en pantalla)
+    const filasConMapa=((data.avances||[]) as Record<string,unknown>[]).filter(av=>((av.map_points as MapPoint[])||[]).length>0);
     const imagenesMapas:Record<string,string|null>={};
-    if(graficasParaCapturar.length||Object.keys(filasMapaPorActividad).length){
+    if(graficasParaCapturar.length||filasConMapa.length){
       showToast('info','Generando gráficas para el PDF…');
       await Promise.all(graficasParaCapturar.map(async c=>{ imagenesGraficas[c.actividad_id]=await capturarElementoComoPng(`activity-chart-${c.actividad_id}`); }));
-      await Promise.all(Object.entries(filasMapaPorActividad).flatMap(([actId,n])=>Array.from({length:n}).map(async(_,fi)=>{
-        imagenesMapas[`${actId}-${fi}`]=await capturarElementoComoPng(`activity-map-${actId}-${fi}`);
-      })));
+      await Promise.all(filasConMapa.map(async av=>{
+        imagenesMapas[av.id as string]=await generarMapaPng(mapaUrl,(av.map_points as MapPoint[])||[],130);
+      }));
     }
     const avances=data.avances as Record<string,unknown>[];
     const cual=((data.cualitativas||[]) as Record<string,unknown>[]);
@@ -2896,7 +2930,7 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
         const img=imagenesGraficas[actId];
         const imgHTML=img?`<img src="${img}" class="chart-img"/>`:'';
         const filasConMapaEsp=items.avances.filter(av=>av.actividad_id===actId&&((av.map_points as MapPoint[])||[]).length>0);
-        const mapaImgs=filasConMapaEsp.map((_,fi)=>imagenesMapas[`${actId}-${fi}`]).filter(Boolean);
+        const mapaImgs=filasConMapaEsp.map(av=>imagenesMapas[av.id as string]).filter(Boolean);
         const mapaHTML=mapaImgs.length?`<div class="map-row">${mapaImgs.map(m=>`<img src="${m}" class="map-img"/>`).join('')}</div>`:'';
         return `<div class="chart-block">${tablaHTML}${imgHTML}${mapaHTML}</div>`;
       }).join('');
