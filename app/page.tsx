@@ -770,15 +770,26 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
       if(!a.especialidad_id||!a.actividad_id||!a.area_id||!a.lider_id){ showToast('err',`Actividad ${i+1}: completa todos los campos`); return; }
       if(!a.personal.length){ showToast('err',`Actividad ${i+1}: agrega al menos una persona`); return; }
     }
+    const docCount=new Map<string,number>();
+    actividades.forEach(a=>a.personal.forEach(p=>docCount.set(p.documento_personal,(docCount.get(p.documento_personal)||0)+1)));
+    const docsDup=[...docCount.entries()].filter(([,n])=>n>1).map(([doc])=>doc);
+    if(docsDup.length){
+      const nombres=docsDup.map(doc=>catalogs?.personal.find(p=>p.documento===doc)?.nombre||doc).join(', ');
+      showToast('err',`${nombres} está asignado en más de una actividad del mismo día. Quítalo de una de las dos.`);
+      return;
+    }
     if(est==='enviado'&&!window.confirm('¿Enviar planeación?')) return;
     setSaving(true);
     try{
       const{data:prog,error:pe}=await supabase.from('programaciones').upsert(
-        {id:progId||undefined,fecha,usuario_id:user.id,usuario_nombre:user.nombre,estado:est,updated_at:new Date().toISOString()},
+        {id:progId||undefined,fecha,usuario_id:user.id,usuario_nombre:user.nombre,estado:progId?estado:'borrador',updated_at:new Date().toISOString()},
         {onConflict:'fecha,usuario_id'}
       ).select().single();
       if(pe||!prog) throw new Error(pe?.message||'Error');
-      await supabase.from('actividades_programadas').delete().eq('programacion_id',prog.id);
+      // Guardamos las actividades nuevas ANTES de borrar las anteriores: si algo falla a mitad
+      // de camino (ej. personal duplicado entre actividades), lo ya guardado no se pierde.
+      const{data:oldActs}=await supabase.from('actividades_programadas').select('id').eq('programacion_id',prog.id);
+      const oldActIds=(oldActs||[]).map(a=>a.id as string);
       for(const act of actividades){
         const{data:aR,error:ae}=await supabase.from('actividades_programadas').insert({
           programacion_id:prog.id, fecha, usuario_id:user.id,
@@ -810,6 +821,9 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
           if(paE) throw new Error(paE.message);
         }
       }
+      // Todo lo nuevo quedó guardado — recién ahora borramos lo anterior y confirmamos el estado.
+      if(oldActIds.length) await supabase.from('actividades_programadas').delete().in('id',oldActIds);
+      await supabase.from('programaciones').update({estado:est,updated_at:new Date().toISOString()}).eq('id',prog.id);
       setProgId(prog.id as string); setEstado(est);
       showToast('ok',est==='enviado'?'Planeación enviada ✓':'Borrador guardado ✓');
       await loadFecha();
