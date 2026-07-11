@@ -557,6 +557,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
   const[estado,setEstado]=useState<'nuevo'|'borrador'|'enviado'>('nuevo');
   const[saving,setSaving]=useState(false);
   const[progId,setProgId]=useState<string|null>(null);
+  const[loadedUpdatedAt,setLoadedUpdatedAt]=useState<string|null>(null);
 
   // Export por rango
   const[showRange,setShowRange]=useState(false);
@@ -734,6 +735,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
     if(prog){
       setEstado(prog.estado as 'nuevo'|'borrador'|'enviado');
       setProgId(prog.id as string);
+      setLoadedUpdatedAt(prog.updated_at as string||null);
       const{data:acts}=await supabase.from('actividades_programadas').select('*').eq('programacion_id',prog.id);
       if(acts?.length){
         const{data:pa}=await supabase.from('personal_asignado').select('*').eq('programacion_id',prog.id);
@@ -751,7 +753,7 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
         return;
       }
     }
-    setEstado('nuevo'); setProgId(null); setActividades([emptyAct()]);
+    setEstado('nuevo'); setProgId(null); setActividades([emptyAct()]); setLoadedUpdatedAt(null);
   },[fecha,user.id]);
 
   useEffect(()=>{loadFecha();},[loadFecha]);
@@ -781,6 +783,16 @@ function PlaneacionModule({user,catalogs,maquinaria,showToast,readOnly=false}:{
     if(est==='enviado'&&!window.confirm('¿Enviar planeación?')) return;
     setSaving(true);
     try{
+      if(progId){
+        // Si alguien más (misma cuenta en otra pestaña/tablet) guardó esta planeación
+        // después de que la cargamos, no seguimos: evita que este guardado borre lo suyo.
+        const{data:current}=await supabase.from('programaciones').select('updated_at').eq('id',progId).single();
+        if(current&&loadedUpdatedAt&&current.updated_at!==loadedUpdatedAt){
+          showToast('err','Otra persona guardó cambios en esta planeación después de que la cargaste. Recarga la fecha para ver lo último y vuelve a intentar.');
+          setSaving(false);
+          return;
+        }
+      }
       const{data:prog,error:pe}=await supabase.from('programaciones').upsert(
         {id:progId||undefined,fecha,usuario_id:user.id,usuario_nombre:user.nombre,estado:progId?estado:'borrador',updated_at:new Date().toISOString()},
         {onConflict:'fecha,usuario_id'}
@@ -1259,21 +1271,30 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
     if(!fecha||!espId){showToast('err','Falta fecha o especialidad');return;}
     if(esDiaAnt&&!solicitudOk&&user.rol!=='admin'){showToast('err','Necesitas aprobación para reportar día anterior. Ve a Solicitudes.');return;}
     setSaving(true);
+    let rid:string|null=null;
     try{
+      const{data:existing}=await supabase.from('reportes_avance').select('id')
+        .eq('fecha',fecha).eq('usuario_id',user.id).eq('especialidad_id',espId).in('estado',['borrador','aprobado']).limit(1);
+      if(existing?.length){
+        showToast('err','Ya existe un reporte tuyo para esta fecha y especialidad. Si necesitas corregirlo, pide a un líder o admin.');
+        return;
+      }
+
       const{data:rep,error:re}=await supabase.from('reportes_avance').insert({
         fecha,usuario_id:user.id,usuario_nombre:user.nombre,especialidad_id:espId,
         jornada_horas:jornadaHrs,clima,charla_preturno:charla,charla_tema:charlaTema,estado:'borrador',
       }).select().single();
       if(re||!rep) throw new Error(re?.message||'Error');
-      const rid=rep.id as string;
+      rid=rep.id as string;
+      const errores:string[]=[];
 
-      await Promise.all([
+      const batchRes=await Promise.all([
         susps.length?supabase.from('suspensiones_clima').insert(susps.map(s=>({
           reporte_id:rid,fecha,usuario_id:user.id,
           hora_inicio:s.hora_inicio||null,hora_fin:s.hora_fin||null,
           horas_perdidas:horasLost([s]),
           descripcion:`[${s.tipo_susp}${s.tipo_susp==='otro'?': '+s.otro_desc:''}] ${s.descripcion}`,
-        }))):null,
+        }))):Promise.resolve(null),
         asistencia.length?supabase.from('asistencia_real').insert(asistencia.map(a=>({
           reporte_id:rid,fecha,usuario_id:user.id,
           personal_id:a.personal_id,documento_personal:a.documento_personal,
@@ -1286,7 +1307,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
           hora_jornada_ini:a.jornada_parcial&&a.hora_jornada_ini?a.hora_jornada_ini:null,
           hora_jornada_fin:a.jornada_parcial&&a.hora_jornada_fin?a.hora_jornada_fin:null,
           es_adicional:a.es_adicional||false,
-        }))):null,
+        }))):Promise.resolve(null),
         maqDia.filter(m=>m.uso==='si').length?supabase.from('novedades_maquinaria').insert(
           maqDia.filter(m=>m.uso==='si').map(m=>({
             reporte_id:rid,fecha,usuario_id:user.id,maquinaria_id:m.maquinaria_id,
@@ -1295,13 +1316,15 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
             hora_fin:m.parcial&&m.hora_fin?m.hora_fin:null,
             horas_standby:0,es_adicional:m.es_adicional||false,
           }))
-        ):null,
+        ):Promise.resolve(null),
         incidente.tipo!=='sin_novedad'?supabase.from('incidentes_seg').insert({
           reporte_id:rid,fecha,usuario_id:user.id,
           tipo:incidente.tipo,descripcion:incidente.descripcion,medidas_tomadas:incidente.medidas,
-        }):null,
-        notaBit?supabase.from('bitacora_decisiones').insert({fecha,usuario_id:user.id,descripcion:notaBit,especialidad_id:espId}):null,
+        }):Promise.resolve(null),
+        notaBit?supabase.from('bitacora_decisiones').insert({fecha,usuario_id:user.id,descripcion:notaBit,especialidad_id:espId}):Promise.resolve(null),
       ]);
+      const batchLabels=['Suspensiones','Asistencia','Maquinaria','Incidente','Bitácora'];
+      batchRes.forEach((r,i)=>{ const err=(r as{error?:{message:string}}|null)?.error; if(err) errores.push(`${batchLabels[i]}: ${err.message}`); });
 
       for(const ar of actReps){
         const cfg=configActs.find(c=>c.actividad_id===ar.actividad_id);
@@ -1312,10 +1335,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
               especialidad_id:espId,cantidad:0,unidad:'cualitativo',
               acumulado_anterior:0,acumulado_total:0,observacion_es:ar.descripcion_cualitativa,
             });
-            if(cualErr){
-              showToast('err','Error guardando cualitativa: '+cualErr.message);
-              console.error('Error cualitativa:',cualErr);
-            }
+            if(cualErr) errores.push(`Avance cualitativo: ${cualErr.message}`);
           }
           continue;
         }
@@ -1332,7 +1352,7 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
             unidad:cfg?.unidad_es||'',acumulado_anterior:acumPrev,acumulado_total:acumPrev+cantidad,
             observacion_es:ar.observacion_es,map_points:area.map_points||[],
           }).select().single();
-          if(avErr){ showToast('err','Error guardando avance: '+avErr.message); console.error('avance_diario insert error:',avErr); }
+          if(avErr) errores.push(`Avance: ${avErr.message}`);
           if(avRow&&!avanceId) avanceId=(avRow as Record<string,unknown>).id as string;
         }
         // Guardar ítems seleccionados si la actividad tiene base de datos
@@ -1355,28 +1375,30 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
         const{error:adErr}=await supabase.from('actividades_adicionales_reporte').insert(
           actAdicionales.map(ad=>({reporte_id:rid,catalogo_id:ad.catalogoId||null,nombre:ad.nombre,descripcion_ejecutado:ad.descripcion,fecha,map_points:ad.map_points||[]}))
         );
-        if(adErr){ showToast('err','Error guardando adicionales: '+adErr.message); console.error('adicionales insert error:',adErr); }
+        if(adErr) errores.push(`Adicionales: ${adErr.message}`);
       }
       // Suspensiones generales (sin actividad)
       // ya se guardan arriba en susps
       // Suspensiones por actividad — guardar en suspensiones_clima con actividad_id
       if(suspPorActividad.length>0){
-        try{
-          await supabase.from('suspensiones_clima').insert(
-            suspPorActividad.map(s=>({
-              reporte_id:rid,fecha,usuario_id:user.id,
-              actividad_id:s.actividad_id,
-              es_general:false,
-              tipo_susp:s.tipo,
-              otro_desc:s.otro_desc||null,
-              hora_inicio:s.parcial&&s.hora_inicio?s.hora_inicio:null,
-              hora_fin:s.parcial&&s.hora_fin?s.hora_fin:null,
-              horas_perdidas:horasLost([s] as unknown as SuspItem[]),
-              descripcion:`[${s.tipo}${s.tipo==='otro'?': '+s.otro_desc:''}] ${s.observacion||''}`,
-            }))
-          );
-        } catch{}
+        const{error:spaErr}=await supabase.from('suspensiones_clima').insert(
+          suspPorActividad.map(s=>({
+            reporte_id:rid,fecha,usuario_id:user.id,
+            actividad_id:s.actividad_id,
+            es_general:false,
+            tipo_susp:s.tipo,
+            otro_desc:s.otro_desc||null,
+            hora_inicio:s.parcial&&s.hora_inicio?s.hora_inicio:null,
+            hora_fin:s.parcial&&s.hora_fin?s.hora_fin:null,
+            horas_perdidas:horasLost([s] as unknown as SuspItem[]),
+            descripcion:`[${s.tipo}${s.tipo==='otro'?': '+s.otro_desc:''}] ${s.observacion||''}`,
+          }))
+        );
+        if(spaErr) errores.push(`Suspensiones por actividad: ${spaErr.message}`);
       }
+
+      if(errores.length) throw new Error(errores.join(' | '));
+
       try{
         const{data:la}=await supabase.from('profiles').select('id').in('rol',['admin','lider']);
         if(la?.length) await supabase.from('notificaciones').insert((la as {id:string}[]).map(x=>({
@@ -1385,7 +1407,12 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
         })));
       } catch{}
       showToast('ok','Reporte enviado ✓');setStep(1);
-    } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
+    } catch(e:unknown){
+      // Nada de esto se guarda a medias: si algo falló, borramos el reporte parcial
+      // (el cascade se lleva sus hijos) para que reintentar no deje duplicados rotos.
+      if(rid) await supabase.from('reportes_avance').delete().eq('id',rid);
+      showToast('err','No se guardó el reporte, intenta de nuevo: '+((e as Error)?.message||'Error'));
+    }
     finally{ setSaving(false); }
   }
 
