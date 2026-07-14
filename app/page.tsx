@@ -2866,11 +2866,28 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
       const horasH=aD.filter(a=>a.asistio).reduce((s,a)=>s+parseFloat(String(a.horas_trabajadas||0)),0);
       const horasC=((sc.data||[]) as Record<string,unknown>[]).reduce((s,a)=>s+parseFloat(String(a.horas_perdidas||0)),0);
 
-      // Calcular acumulado real incluyendo acumulado previo de config
+      // Calcular acumulado real sumando toda la cantidad historica de cada actividad, en vez de
+      // confiar en el acumulado_total que quedo guardado en cada fila al momento de insertarla:
+      // si dos cuadrillas reportan la misma actividad casi al mismo tiempo, cada una calcula su
+      // "acumulado previo" antes de que la otra termine de guardar, y el mayor de los dos pisa
+      // (no suma) al otro — el avance de una cuadrilla queda fuera del acumulado/% mostrado
+      // aunque su dato crudo sí está guardado. Sumar la cantidad cruda de nuevo aquí es inmune
+      // a ese cruce.
+      const actIdsUnicos=[...new Set(avD.map(a=>a.actividad_id as string))];
+      const acumuladoPorActividad:Record<string,number>={};
+      if(actIdsUnicos.length){
+        const{data:histRows}=await supabase.from('avance_diario').select('actividad_id,cantidad')
+          .in('actividad_id',actIdsUnicos).neq('unidad','cualitativo').lte('fecha',fechaFin);
+        (histRows||[]).forEach((r:Record<string,unknown>)=>{
+          const id=r.actividad_id as string;
+          acumuladoPorActividad[id]=(acumuladoPorActividad[id]||0)+parseFloat(String(r.cantidad||0));
+        });
+      }
       const avConMeta:Record<string,unknown>[]=avD.map(av=>{
         const cfg=configActs.find(c=>c.actividad_id===(av.actividad_id as string));
         const acumPrevio=cfg?.acumulado_previo||0;
-        return{...av,acumulado_total_real:(av.acumulado_total as number)+acumPrevio};
+        const acumHist=acumuladoPorActividad[av.actividad_id as string]||0;
+        return{...av,acumulado_total_real:acumHist+acumPrevio};
       });
       const avancesNorm=avConMeta.filter(a=>a.unidad!=='cualitativo');
       const cualitativas=avConMeta.filter(a=>a.unidad==='cualitativo');
