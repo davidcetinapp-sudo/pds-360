@@ -54,6 +54,17 @@ function actsForEsp(rows:EspAct[], espId:string):EspAct[] {
   const t = (e.especialidad_es||'').toLowerCase();
   return rows.filter(r=>(r.especialidad_es||'').toLowerCase()===t);
 }
+// reportes_avance.estado solo admite 'borrador'/'aprobado' (constraint de la base) — un rechazo
+// se registra unicamente en aprobacion_informes y el reporte se queda en 'borrador' para siempre.
+// Cualquier pantalla que trate 'borrador' como "activo/pendiente" debe filtrar los rechazados
+// con esta función o los sigue contando/mostrando como si nunca se hubieran decidido.
+async function excluirRechazados<T extends Record<string,unknown>>(reps:T[]|null|undefined):Promise<T[]>{
+  if(!reps?.length) return [];
+  const ids=reps.map(r=>r.id as string);
+  const{data:rech}=await supabase.from('aprobacion_informes').select('reporte_id').in('reporte_id',ids).eq('estado','rechazado');
+  const rechazadosIds=new Set((rech||[]).map((r:Record<string,unknown>)=>r.reporte_id as string));
+  return reps.filter(r=>!rechazadosIds.has(r.id as string));
+}
 function resumenPorActividad(avances:Record<string,unknown>[], configActs:ConfigAct[], catalogs:Catalogs|null){
   const porAct:Record<string,{nombre:string;unidad:string;meta:number|null;totalRango:number;acumuladoHistorico:number;pct:number|null}> = {};
   avances.forEach(av=>{
@@ -1273,9 +1284,13 @@ function ReporteModule({user,catalogs,maquinaria,configActs,showToast}:{
     setSaving(true);
     let rid:string|null=null;
     try{
-      const{data:existing}=await supabase.from('reportes_avance').select('id')
-        .eq('fecha',fecha).eq('usuario_id',user.id).eq('especialidad_id',espId).in('estado',['borrador','aprobado']).limit(1);
-      if(existing?.length){
+      const{data:existingRaw}=await supabase.from('reportes_avance').select('id')
+        .eq('fecha',fecha).eq('usuario_id',user.id).eq('especialidad_id',espId).in('estado',['borrador','aprobado']);
+      // Un reporte rechazado se queda en estado 'borrador' para siempre (la base no admite
+      // 'rechazado' en reportes_avance) — sin este filtro, un técnico nunca podría reenviar
+      // el reporte del mismo día/especialidad después de que se lo rechazaran.
+      const existing=await excluirRechazados(existingRaw as{id:string}[]|null);
+      if(existing.length){
         showToast('err','Ya existe un reporte tuyo para esta fecha y especialidad. Si necesitas corregirlo, pide a un líder o admin.');
         return;
       }
@@ -1949,7 +1964,11 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
     if(!fecha||!espId){showToast('err','Selecciona fecha y especialidad');return;}
     setLoading(true);
     try{
-      const{data:reps}=await supabase.from('reportes_avance').select('*').eq('fecha',fecha).eq('especialidad_id',espId).eq('estado','borrador');
+      const{data:repsRaw}=await supabase.from('reportes_avance').select('*').eq('fecha',fecha).eq('especialidad_id',espId).eq('estado','borrador');
+      // reportes_avance.estado no admite 'rechazado' (constraint de la base); un rechazo se
+      // registra solo en aprobacion_informes y el reporte se queda en 'borrador' para siempre.
+      // Hay que excluirlo aqui a mano o reaparece como pendiente de decision cada vez.
+      const reps=await excluirRechazados(repsRaw as Record<string,unknown>[]|null);
       const repIds=(reps||[]).map((r:Record<string,unknown>)=>r.id as string);
       const avs=repIds.length?(await supabase.from('avance_diario').select('*').in('reporte_id',repIds)).data||[]:[];
       const adics=repIds.length?(await supabase.from('actividades_adicionales_reporte').select('*').in('reporte_id',repIds)).data||[]:[];
@@ -1966,8 +1985,9 @@ function AprobacionModule({user,catalogs,configActs,showToast,onRefreshNotifs}:{
   async function cargarPendientes(){
     setLoadingPend(true);
     try{
-      const{data:pends}=await supabase.from('reportes_avance').select('id,fecha,especialidad_id,estado,usuario_nombre,created_at,especialidades_actividades(especialidad_es)').in('estado',['borrador','enviado']).order('fecha',{ascending:false});
-      setPendientes((pends||[]) as Record<string,unknown>[]);
+      const{data:pendsRaw}=await supabase.from('reportes_avance').select('id,fecha,especialidad_id,estado,usuario_nombre,created_at,especialidades_actividades(especialidad_es)').in('estado',['borrador','enviado']).order('fecha',{ascending:false});
+      const pends=await excluirRechazados(pendsRaw as Record<string,unknown>[]|null);
+      setPendientes(pends);
     } catch{ setPendientes([]); }
     finally{ setLoadingPend(false); }
   }
@@ -2280,12 +2300,15 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
     try{
       let qR=supabase.from('reportes_avance').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin);
       if(espIds.length) qR=qR.in('especialidad_id',espIds);
-      const[reps,incid,maqD]=await Promise.all([
+      const[repsRes,incid,maqD]=await Promise.all([
         qR,
         supabase.from('incidentes_seg').select('*').gte('fecha',fechaIni).lte('fecha',fechaFin).neq('tipo','sin_novedad'),
         incluirMaquinaria?supabase.from('maquinaria').select('*'):Promise.resolve({data:[]}),
       ]);
-      const repIds=(reps.data||[]).map((r:Record<string,unknown>)=>r.id as string);
+      // Un reporte rechazado se queda en 'borrador' para siempre (la base no admite 'rechazado'
+      // en reportes_avance) — sin excluirlo, sus datos seguirían sumando en el dashboard.
+      const reps=await excluirRechazados(repsRes.data as Record<string,unknown>[]|null);
+      const repIds=reps.map((r:Record<string,unknown>)=>r.id as string);
       // Cargar avances, asistencia, cualitativas y adicionales filtrados por reportes
       const[avances,asist,adics,susps]=await Promise.all([
         repIds.length?supabase.from('avance_diario').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
@@ -2330,7 +2353,7 @@ function DashboardModule({catalogs,configActs,showToast}:{catalogs:Catalogs|null
       const horasSB=(novedades||[]).reduce((s:number,n:Record<string,unknown>)=>s+parseFloat(String(n.horas_standby||0)),0);
 
       const avanceRaw=avD.filter(av=>av.unidad!=='cualitativo').map(av=>({fecha:av.fecha as string,actividad_id:av.actividad_id as string,area_id:av.area_id as string,cantidad:parseFloat(String(av.cantidad||0))}));
-      setData({reportes:reps.data||[],horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,avance_por_dia:avPorDia,avance_raw:avanceRaw,incidentes_por_tipo:incPorTipo,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
+      setData({reportes:reps,horas_hombre:Math.round(horasH),horas_perdidas:Math.round(horasP),eficiencia_personal:pl>0?Math.round(re/pl*100):100,incidentes:incid.data||[],maquinaria:maqD.data||[],avance_por_actividad:avPorAct,avance_por_dia:avPorDia,avance_raw:avanceRaw,incidentes_por_tipo:incPorTipo,cualitativas:cualD,adicionales:adicD,asistencia:aD,suspensiones:suspD,total_personal_dias:aD.length,horas_standby_total:horasSB.toFixed(1)});
     } catch(e:unknown){ showToast('err',(e as Error)?.message||'Error'); }
     finally{ setLoading(false); }
   }
@@ -2850,8 +2873,12 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
       if(espIds.length) qR=qR.in('especialidad_id',espIds);
       if(soloAp) qR=qR.eq('estado','aprobado');
       if(user.rol==='cliente') qR=qR.eq('estado','aprobado');
-      const{data:reps}=await qR;
-      const repIds=(reps||[]).map((r:Record<string,unknown>)=>r.id as string);
+      const{data:repsRaw}=await qR;
+      // Un reporte rechazado se queda en estado 'borrador' (la base no admite 'rechazado' en
+      // reportes_avance) — sin excluirlo aquí, sus cantidades seguirían sumando al acumulado
+      // aunque un líder ya haya dicho explícitamente que ese dato no es válido.
+      const reps=await excluirRechazados(repsRaw as Record<string,unknown>[]|null);
+      const repIds=reps.map((r:Record<string,unknown>)=>r.id as string);
       const[av,as2,sc,maqNov,adics]=await Promise.all([
         repIds.length?supabase.from('avance_diario').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
         repIds.length&&incluirPersonal?supabase.from('asistencia_real').select('*').in('reporte_id',repIds):Promise.resolve({data:[]}),
@@ -2876,9 +2903,19 @@ function InformesModule({user,catalogs,configActs,maquinaria,showToast}:{
       const actIdsUnicos=[...new Set(avD.map(a=>a.actividad_id as string))];
       const acumuladoPorActividad:Record<string,number>={};
       if(actIdsUnicos.length){
-        const{data:histRows}=await supabase.from('avance_diario').select('actividad_id,cantidad')
+        const{data:histRows}=await supabase.from('avance_diario').select('actividad_id,cantidad,reporte_id')
           .in('actividad_id',actIdsUnicos).neq('unidad','cualitativo').lte('fecha',fechaFin);
-        (histRows||[]).forEach((r:Record<string,unknown>)=>{
+        // Esta suma historica mira MAS ALLA del rango/reportes ya filtrados arriba (recorre
+        // toda la actividad hasta fechaFin), asi que hay que volver a excluir los reportes
+        // rechazados aqui tambien — de lo contrario sus cantidades se cuelan en el acumulado.
+        const histReporteIds=[...new Set((histRows||[]).map((r:Record<string,unknown>)=>r.reporte_id as string))];
+        let rechazadosHist=new Set<string>();
+        if(histReporteIds.length){
+          const{data:rech}=await supabase.from('aprobacion_informes').select('reporte_id')
+            .in('reporte_id',histReporteIds).eq('estado','rechazado');
+          rechazadosHist=new Set((rech||[]).map((r:Record<string,unknown>)=>r.reporte_id as string));
+        }
+        (histRows||[]).filter((r:Record<string,unknown>)=>!rechazadosHist.has(r.reporte_id as string)).forEach((r:Record<string,unknown>)=>{
           const id=r.actividad_id as string;
           acumuladoPorActividad[id]=(acumuladoPorActividad[id]||0)+parseFloat(String(r.cantidad||0));
         });
